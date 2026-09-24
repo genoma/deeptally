@@ -24,17 +24,21 @@ struct LocalUsageLedgerTests {
   }
 
   /// A ledger actor whose source is the stub, so these tests never build a fixture opencode database.
+  /// The shipped price table is the one the app ships with, so the stub's default `deepseek-flash`
+  /// rows are priced and these assertions are not about the coverage note.
   private func makeLedger(
     source: StubUsageSource,
     ledgerURL: URL? = nil,
     canImport: Bool = true
-  ) -> LocalUsageLedger {
+  ) throws -> LocalUsageLedger {
     let target = ledgerURL ?? temporaryLedgerURL()
+    let table = try PriceTableLoader().loadBundled()
     // `nil` is the shipping "no usable price table" case: read the metrics, import nothing.
     if canImport {
-      return LocalUsageLedger(ledgerURL: target, makeSource: { [source] in source })
+      return LocalUsageLedger(
+        ledgerURL: target, priceTable: table, makeSource: { [source] in source })
     }
-    return LocalUsageLedger(ledgerURL: target, makeSource: nil)
+    return LocalUsageLedger(ledgerURL: target, priceTable: table, makeSource: nil)
   }
 
   @Test("today's spend is the local day, not the UTC day the rollup is keyed by")
@@ -48,7 +52,8 @@ struct LocalUsageLedgerTests {
       importedRecord(at: try Self.date("2026-09-23T09:00:00Z"), costUSD: decimal("0.10")),
     ])
 
-    let outcome = await makeLedger(source: source).refresh(now: now, calendar: Self.calendar)
+    let ledger = try makeLedger(source: source)
+    let outcome = await ledger.refresh(now: now, calendar: Self.calendar)
 
     #expect(outcome.importProblem == nil)
     #expect(outcome.metrics?.todaySpendUSD == decimal("0.25"))
@@ -69,7 +74,8 @@ struct LocalUsageLedgerTests {
         costUSD: decimal("0.30")),
     ])
 
-    let outcome = await makeLedger(source: source).refresh(now: now, calendar: Self.calendar)
+    let ledger = try makeLedger(source: source)
+    let outcome = await ledger.refresh(now: now, calendar: Self.calendar)
 
     #expect(outcome.metrics?.cacheHitRatio == 0.75)
   }
@@ -84,7 +90,8 @@ struct LocalUsageLedgerTests {
         costUSD: decimal("0.10"))
     ])
 
-    let outcome = await makeLedger(source: source).refresh(now: now, calendar: Self.calendar)
+    let ledger = try makeLedger(source: source)
+    let outcome = await ledger.refresh(now: now, calendar: Self.calendar)
 
     // A rate with no denominator is unknown, not zero: `nil` is what the label turns into an em dash.
     #expect(outcome.metrics?.cacheHitRatio == nil)
@@ -97,7 +104,7 @@ struct LocalUsageLedgerTests {
     let now = try Self.date("2026-09-23T11:30:00Z")
     let imported = try Self.date("2026-09-23T12:00:00Z")
     source.offer([importedRecord(at: imported, costUSD: decimal("0.42"))])
-    let ledger = makeLedger(source: source)
+    let ledger = try makeLedger(source: source)
 
     _ = await ledger.refresh(now: now, calendar: Self.calendar)
     source.offer([])
@@ -116,7 +123,7 @@ struct LocalUsageLedgerTests {
     let source = StubUsageSource()
     let now = try Self.date("2026-09-23T11:30:00Z")
     source.offer([importedRecord(at: now, costUSD: decimal("0.42"))])
-    let ledger = makeLedger(source: source)
+    let ledger = try makeLedger(source: source)
 
     let first = await ledger.refresh(now: now, calendar: Self.calendar)
     #expect(first.metrics?.todaySpendUSD == decimal("0.42"))
@@ -133,7 +140,7 @@ struct LocalUsageLedgerTests {
     let source = StubUsageSource()
     source.offer([importedRecord(at: try Self.date("2026-09-23T12:00:00Z"), costUSD: decimal("9"))])
     // `/dev/null` is not a directory, so the ledger's folder cannot be created under it.
-    let ledger = makeLedger(
+    let ledger = try makeLedger(
       source: source, ledgerURL: URL(fileURLWithPath: "/dev/null/deeptally/ledger.sqlite"))
 
     let outcome = await ledger.refresh(
@@ -149,7 +156,7 @@ struct LocalUsageLedgerTests {
   func noPriceTableDisablesImporting() async throws {
     let source = StubUsageSource()
     source.offer([importedRecord(at: try Self.date("2026-09-23T12:00:00Z"), costUSD: decimal("9"))])
-    let ledger = makeLedger(source: source, canImport: false)
+    let ledger = try makeLedger(source: source, canImport: false)
 
     let outcome = await ledger.refresh(
       now: try Self.date("2026-09-23T11:30:00Z"), calendar: Self.calendar)

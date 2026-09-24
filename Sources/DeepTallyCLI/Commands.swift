@@ -55,7 +55,7 @@ final class PricingCoverage: UsageImporting {
 
 /// Process exit codes. Contractual for scripts: 0 success, 2 a missing or unusable key, 1 a usage
 /// error or any other failure that is not about the key.
-private enum ExitCode: Int32 {
+enum ExitCode: Int32 {
   case ok = 0
   case failure = 1
   case key = 2
@@ -87,7 +87,9 @@ enum CLI {
       deeptally ledger export <path.csv>
                                    Write every raw ledger row as CSV
       deeptally ledger prune --days N
-                                   Delete raw rows older than N days (the rollups are kept)
+                                   Delete raw rows older than N days. The daily rollups keep only
+                                   the pruned range's aggregate: it no longer appears in
+                                   `deeptally usage`, and a reprice can no longer revise it
       deeptally ledger reprice [--json]
                                    Re-price every stored row with the current price table
       deeptally key status         Show which store supplies the API key
@@ -113,8 +115,8 @@ enum CLI {
 
     EXIT CODES:
       0 ok — including `import` with no opencode database, which is not an error
-      2 no usable key
-      1 a usage error or any other failure
+      2 no usable key: neither store has one, or the service rejected the stored one
+      1 a usage error or any other failure (a network outage, a rate limit, a server error)
     """
 
   /// Runs one invocation and returns the process exit code. Failures go to stderr here, so exactly
@@ -177,7 +179,11 @@ enum CLI {
     do {
       balance = try await client.balance()
     } catch {
-      throw CommandFailure(message: DeepSeekClient.describe(error), code: .key)
+      // Only a missing key (unreachable here, the key is already resolved) or one the service
+      // rejects is a key problem; an offline laptop, a rate limit or a 5xx is an ordinary failure.
+      // The message is the same either way, and never carries the key.
+      throw CommandFailure(
+        message: DeepSeekClient.describe(error), code: balanceExitCode(for: error))
     }
     guard let info = balance.primary else {
       throw CommandFailure(message: "No balance information returned.", code: .failure)
@@ -189,6 +195,24 @@ enum CLI {
     if resolution.origin == .environment {
       // On stderr, so a script reading the balance from stdout is unaffected.
       writeToStandardError(environmentHint)
+    }
+  }
+
+  /// The exit code for a failed `/user/balance` request: 2 only when the key is missing or the
+  /// service rejected it, 1 for everything else. A transport failure means the key was never
+  /// presented to anyone, so reporting it as "no usable key" would make an offline laptop look like
+  /// a bad credential to a script (the finding this pins down).
+  static func balanceExitCode(for error: any Error) -> ExitCode {
+    guard let apiError = error as? DeepSeekClient.APIError else { return .failure }
+    switch apiError {
+    case .missingAPIKey:
+      return .key
+    case .http(let status, _):
+      // 401 is the documented authentication failure; 403 is the service refusing the credential
+      // it received. 402 (insufficient balance), 429 (rate limit) and 5xx are not key problems.
+      return status == 401 || status == 403 ? .key : .failure
+    case .decoding, .transport:
+      return .failure
     }
   }
 
@@ -622,7 +646,12 @@ enum CLI {
   }
 
   /// `deeptally ledger prune --days N`. Only raw rows go: the UTC `daily` rollups derived from them
-  /// are kept, so the totals a pruned day contributed survive (`LedgerStore.pruneRawRequests`).
+  /// are kept, so the pruned days' aggregates survive (`LedgerStore.pruneRawRequests`).
+  ///
+  /// No command reads those rollups yet, so the report must not imply the pruned range is still
+  /// available: the range disappears from `deeptally usage`, the rollups hold only its aggregate,
+  /// and a reprice — which reads raw rows — can no longer revise it. ``pruneReport(removed:days:)``
+  /// is the wording, kept separate so a test can pin it without capturing stdout.
   private static func ledgerPrune(_ arguments: [String], ledgerURL: URL) throws {
     let options: PruneOptions
     do {
@@ -639,9 +668,19 @@ enum CLI {
       throw CommandFailure(
         message: "Could not prune the ledger: \(describe(error))", code: .failure)
     }
-    print(
-      "Pruned \(rawRows(removed)) older than \(options.days) days;"
-        + " the daily rollups were kept.")
+    print(pruneReport(removed: removed, days: options.days))
+  }
+
+  /// The honest prune report. "The rollups were kept" was true but misleading: nothing reads them,
+  /// so the totals are not shown anywhere, and the rows cannot come back — the import watermark
+  /// stops a re-import from restoring them.
+  static func pruneReport(removed: Int, days: Int) -> String {
+    guard removed > 0 else {
+      return "Nothing older than \(days) days to prune; the daily rollups are unchanged."
+    }
+    return "Pruned \(rawRows(removed)) older than \(days) days.\n"
+      + "  The pruned range no longer appears in `deeptally usage`: only its aggregate survives in"
+      + " the daily rollups, and `ledger reprice` can no longer revise it."
   }
 
   private static let ledgerExportUsage = "usage: deeptally ledger export <path.csv>"

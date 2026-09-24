@@ -463,6 +463,7 @@ func makeFixture(
   let loginItem = LoginItemStub()
   let ledger = LocalUsageLedger(
     ledgerURL: environment.ledgerURL,
+    priceTable: environment.priceTable,
     makeSource: { [usageSource] in usageSource })
   let model = AppModel(
     environment: environment,
