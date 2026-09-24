@@ -1,5 +1,5 @@
 {
-  "version": "0.0.0-placeholder",
+  "version": "2026-09-24",
   "currency": "USD",
   "effective_from": "2026-09-24",
   "off_peak_multiplier": "0.5",
@@ -8,5 +8,18 @@
     { "start_hour_utc": 6, "end_hour_utc": 10 }
   ],
   "holidays": [],
-  "models": []
+  "models": [
+    {
+      "model": "deepseek-flash",
+      "cache_hit_usd_per_million": "0.006",
+      "cache_miss_usd_per_million": "0.30",
+      "output_usd_per_million": "1.20"
+    },
+    {
+      "model": "deepseek-v4-pro",
+      "cache_hit_usd_per_million": "0.044",
+      "cache_miss_usd_per_million": "1.32",
+      "output_usd_per_million": "3.96"
+    }
+  ]
 }
