@@ -273,6 +273,116 @@ struct PriceTableLoaderTests {
   }
 }
 
+// MARK: - Error text
+
+/// The one definition of every price-data sentence (``PricingDataError/userFacingSentence``), plus
+/// the clause the override diagnostic wraps. The three call sites that used to spell these strings
+/// out for themselves now read them from here, so this suite is the whole text contract: a case
+/// added to `PricingDataError` must land in ``PricingErrorTextTests/wordings`` or the exhaustive
+/// switch in ``PricingErrorTextTests/everyCaseIsListed()`` stops this file from compiling
+/// (AGENTS.md §9.14).
+@Suite("Pricing error text")
+struct PricingErrorTextTests {
+  /// A non-pricing error, to keep the loader's `String(describing:)` fallback covered.
+  private struct PlainError: Error {}
+
+  /// Every case, with both renderings a user can see: the sentence (`deeptally rate`, the app
+  /// banner) and the reason clause the override diagnostic wraps in its own sentence. The wording is
+  /// spelled out rather than derived, because this is the contract users have already read.
+  private static let wordings: [(error: PricingDataError, sentence: String, reason: String)] = [
+    (
+      .resourceMissing(name: "PriceTable.json"),
+      "PriceTable.json is missing or unreadable.",
+      "the file is missing or unreadable"
+    ),
+    (
+      .decodeFailed(name: "PriceTable.json", detail: "keyNotFound"),
+      "PriceTable.json is not valid JSON for its schema: keyNotFound",
+      "the file is not valid JSON for the price-table schema (keyNotFound)"
+    ),
+    (
+      .noModels,
+      "the price table lists no models.",
+      "the table lists no models"
+    ),
+    (
+      .invalidOffPeakMultiplier(Decimal.parse("1.5")),
+      "the off-peak multiplier 1.5 is not in (0, 1].",
+      "the off-peak multiplier 1.5 is not in (0, 1]"
+    ),
+    (
+      .invalidPeakWindow(startHourUTC: 5, endHourUTC: 4),
+      "the peak window 5-4 UTC is not a valid hour range.",
+      "the peak window 5-4 UTC is not a valid hour range"
+    ),
+    (
+      .duplicateAlias(alias: "deepseek-v4-flash"),
+      "the alias \"deepseek-v4-flash\" is listed on more than one model.",
+      "the alias \"deepseek-v4-flash\" is listed on more than one model"
+    ),
+  ]
+
+  @Test("every case reads exactly as the sentence users have already seen")
+  func sentencePerCase() {
+    for (error, sentence, _) in Self.wordings {
+      #expect(error.userFacingSentence == sentence)
+    }
+  }
+
+  /// The loader's half of the same definition: `reason(for:)` must not grow a second switch.
+  @Test("the override diagnostic's clause comes from the same definition, for every case")
+  func reasonPerCase() {
+    for (error, _, reason) in Self.wordings {
+      #expect(PriceTableLoader.reason(for: error) == reason)
+    }
+
+    // An error that is not a pricing failure keeps its own description rather than a pricing one.
+    let plain = PlainError()
+    #expect(PriceTableLoader.reason(for: plain) == String(describing: plain))
+  }
+
+  @Test("no case can ship wordless, and the list above names every case exactly once")
+  func everyCaseIsListed() {
+    for (error, _, _) in Self.wordings {
+      // The switch, not the loop, is the guard: it is exhaustive over `PricingDataError` today, so a
+      // new case makes this file fail to build until its sentence is asserted above.
+      switch error {
+      case .resourceMissing, .decodeFailed, .noModels, .invalidOffPeakMultiplier,
+        .invalidPeakWindow, .duplicateAlias:
+        break
+      }
+    }
+    #expect(Self.wordings.count == 6)
+  }
+}
+
+// MARK: - Override diagnostics
+
+@Suite("Override diagnostic")
+struct OverrideProblemTests {
+  /// The rejection the app banner and the CLI show, whole: the file, the clause from the one
+  /// definition, and what is in use instead. Asserted literally because users have read it.
+  @Test("names the file, the clause and the fallback")
+  func namesFileClauseAndFallback() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(homeDirectory: home)
+    try writeOverride(fixtureTable(version: "override-without-models", models: []), in: home)
+
+    let (table, problem) = try loader.loadWithDiagnostics()
+    let sentence = try #require(problem)
+
+    #expect(table.version == "2026-09-24")
+    #expect(
+      sentence
+        == "The price override at \(loader.overrideURL.path(percentEncoded: false))"
+        + " was ignored: the table lists no models. The bundled price table is in use."
+    )
+    // And the clause inside it is the one definition's, not a second copy of the wording.
+    #expect(sentence.contains(PricingDataError.noModels.overrideProblemReason))
+  }
+}
+
 // MARK: - Holidays
 
 @Suite("Holiday calendar")

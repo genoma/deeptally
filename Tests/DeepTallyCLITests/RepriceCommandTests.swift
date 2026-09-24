@@ -75,6 +75,30 @@ private func baselineOutcome(
   )
 }
 
+// MARK: - Error text
+
+@Suite("CLI pricing failure")
+struct CLIPricingFailureTests {
+  /// `rate`, `usage` and `ledger reprice` all fail through `pricing()`, which prints the sentence
+  /// ``PricingDataError/userFacingSentence`` defines — the same words the app banner shows. These
+  /// assertions are what fail if the wording is ever copied back into the CLI.
+  @Test("the failure line is core's sentence, prefixed with what could not be loaded")
+  func failureLineSharesTheCoreSentence() {
+    for error in [PricingDataError.noModels, .duplicateAlias(alias: "deepseek-v4-flash")] {
+      #expect(
+        CLI.pricingFailureMessage(error)
+          == "Could not load the pricing data: \(error.userFacingSentence)")
+    }
+
+    #expect(
+      CLI.pricingFailureMessage(.noModels)
+        == "Could not load the pricing data: the price table lists no models.")
+    #expect(
+      CLI.pricingFailureMessage(.resourceMissing(name: "PriceTable.json"))
+        == "Could not load the pricing data: PriceTable.json is missing or unreadable.")
+  }
+}
+
 // MARK: - ledger reprice
 
 @Suite("CLI ledger reprice")

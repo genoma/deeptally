@@ -107,42 +107,11 @@ public struct PriceTableLoader: Sendable {
       + " The bundled price table is in use."
   }
 
-  /// A decode failure's detail can carry an entire `NSError` dump - `NSDebugDescription=`, a
-  /// `UserInfo` dictionary, an error domain and code. That is developer noise in a user-facing
-  /// banner, so keep the one clause a person editing the file can act on.
-  static func shortDetail(_ detail: String) -> String {
-    var text = detail
-    if let clause = text.range(of: "NSDebugDescription=") {
-      text = String(text[clause.upperBound...])
-      if let end = text.firstIndex(where: { $0 == "," || $0 == "}" }) {
-        text = String(text[..<end])
-      }
-    }
-    text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    if text.isEmpty {
-      return "the file could not be read"
-    }
-    return text.count > 160 ? String(text.prefix(157)) + "..." : text
-  }
-
-  /// The reason half of ``overrideProblem(at:error:)``. A decode failure keeps its detail, which
-  /// names the offending field — the one thing a user editing the file needs.
+  /// The reason half of ``overrideProblem(at:error:)``: the clause ``PricingDataError`` defines for
+  /// the case, so the override sentence and the app banner cannot drift apart.
   static func reason(for error: any Error) -> String {
     guard let pricing = error as? PricingDataError else { return String(describing: error) }
-    switch pricing {
-    case .resourceMissing:
-      return "the file is missing or unreadable"
-    case .decodeFailed(_, let detail):
-      return "the file is not valid JSON for the price-table schema (\(shortDetail(detail)))"
-    case .noModels:
-      return "the table lists no models"
-    case .invalidOffPeakMultiplier(let value):
-      return "the off-peak multiplier \(value) is not in (0, 1]"
-    case .invalidPeakWindow(let start, let end):
-      return "the peak window \(start)-\(end) UTC is not a valid hour range"
-    case .duplicateAlias(let alias):
-      return "the alias \"\(alias)\" is listed on more than one model"
-    }
+    return pricing.overrideProblemReason
   }
 
   /// Decodes and validates one table. `name` only appears in thrown errors.
