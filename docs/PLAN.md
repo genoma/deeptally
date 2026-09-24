@@ -1,0 +1,217 @@
+# DeepTally — implementation plan
+
+**Status:** Step 0 complete · **Last updated:** 2026-09-24 · **Owner:** @genoma
+**Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `dtally`
+
+> **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
+> flipped in the same commit, and a dated line is added to the progress log (§10). Nothing gets built
+> ahead of the plan without a decision recorded here first.
+
+---
+
+## 1. Locked decisions
+
+| # | Decision | Value | Reason |
+|---|---|---|---|
+| 1 | Distribution | GitHub Releases, **DMG, ad-hoc signed, not notarized** | No Apple Developer Program |
+| 2 | Apple Developer Program | **No** ($99/yr declined) | Consequence: no cask, no Sparkle, one Keychain prompt per update, "Open Anyway" docs required |
+| 3 | Platform | **macOS 15.0+**, arm64-only, 64-bit native | macOS 27 Golden Gate is Apple-silicon-only; 15+ ≈ 98% of tracked installs |
+| 4 | Stack | Swift 6.4 + SwiftPM, AppKit `NSStatusItem` + SwiftUI popover, system `libsqlite3` | No Xcode, no third-party deps |
+| 5 | License | **GPL-3.0-or-later** | User requirement; App Store is incompatible by design → GitHub distribution |
+| 6 | Name | **DeepTally** (repo `deeptally`) | 0 GitHub name collisions; "DeepSeek" kept in the README, not the product name |
+| 7 | CLI | `dtally` sharing `DeepTallyCore` | Enables brew **formula** (not cask), scripting, SwiftBar, testability |
+| 8 | Repo model | **Git flow** (`main`/`develop`, `feature/*`, `release/*`, `hotfix/*`) + **SemVer** + Conventional Commits | User requirement |
+| 9 | Proxy capture | Deferred to v1.1, opt-in, loopback only | v1 covers the real usage path (opencode) already |
+| 10 | Privacy | Local-only, no telemetry, counters never content | Non-negotiable |
+
+## 2. Non-goals (v1)
+
+App Store · Intel/universal binaries · notarization · Homebrew cask · Sparkle auto-update · cloud sync ·
+iOS · scraping DeepSeek's private dashboard endpoints · storing prompt or completion text ·
+per-request cost claims from gateway providers (kilo/openrouter are labelled *estimated*).
+
+## 3. Verified evidence (2026-09-24)
+
+**Platform**
+- macOS 27 "Golden Gate" is shipping; build `26A428` = this machine. First Apple-silicon-only macOS.
+  macOS 26.7 / 15.8 still receive security updates; Sonoma is out of support.
+- API floors: `MenuBarExtra` 13.0, `SMAppService` 13.0, `Observation`/`SwiftData` 14.0 → all ≤ 15.0.
+- `MenuBarExtra`-only accessory apps can die silently on macOS 26+ when disabled in Control Center → use `NSStatusItem`.
+- No `actool`; `iconutil` + `sips` present → prebuilt `.icns`.
+- 0 code-signing identities on this machine → ad-hoc (`codesign --sign -`) is the only option.
+
+**DeepSeek API (probed live)**
+- `GET /user/balance` → `{ is_available, balance_infos: [{ currency, total_balance, granted_balance, topped_up_balance }] }`, amounts are **strings**, no timestamp → show "as of".
+- `GET /models` → exactly `deepseek-flash`, `deepseek-v4-pro`.
+- Chat usage carries `prompt_tokens`, `completion_tokens`, `total_tokens`,
+  `prompt_cache_hit_tokens`, `prompt_cache_miss_tokens`, `prompt_tokens_details.cached_tokens`.
+  `prompt_tokens = cache_hit + cache_miss`.
+- **There is no historical usage/spend API.** Only per-request usage + a manual monthly CSV export.
+- Rate limits are concurrency-based (2500 flash / 500 pro); errors 401/402/429.
+
+**Pricing (USD per 1M tokens, peak / off-peak) — volatile data, never hardcoded**
+
+| Model | cache-hit | cache-miss | output |
+|---|---|---|---|
+| `deepseek-flash` (V4.1-Flash) | 0.006 / 0.003 | 0.30 / 0.15 | 1.20 / 0.60 |
+| `deepseek-v4-pro` | 0.044 / 0.022 | 1.32 / 0.66 | 3.96 / 1.98 |
+
+Peak = 01:00–04:00 and 06:00–10:00 UTC, Mon–Fri, excluding Chinese public holidays; everything else is
+off-peak at exactly half. Model line-up/prices changed three times in 2026 → `Resources/PriceTable.json`.
+
+**Local usage source**
+- `~/.local/share/opencode/opencode.db` (SQLite): `message.data` JSON has `tokens.input/output/reasoning/cache.read/cache.write`
+  plus `cost`, `modelID`, `providerID`; `session` denormalises per-model totals. Cache reads verified non-zero locally.
+- The DB also stores credentials **in plaintext** in a credential table → read `message` only, never that table.
+- Two schema generations exist (`message`+`part`, `session_message`) → feature-detect.
+
+**Distribution mechanics (verified on macOS 27)**
+- Gatekeeper gates on **quarantine**: browser downloads → blocked; `curl` downloads carry only `com.apple.provenance` → launch cleanly.
+- macOS 15+ removed the Control-click bypass → *System Settings → Privacy & Security → Open Anyway*.
+- Ad-hoc cdhash is content-derived → one Keychain re-authorization per app update.
+- Homebrew casks now require Gatekeeper-passing apps and `--no-quarantine` was removed → no cask; a **formula** for the CLI is allowed.
+- GitHub Actions: free arm64 `macos-26` runner with Xcode 26.x for public repos (CI is easier than local builds).
+
+## 4. Architecture
+
+```
+DeepSeek API ──balance──┐
+                        ├──> BalanceService ──> MenuBarLabel + Popover
+usage sources:          │
+  opencode.db ──import──┤
+  loopback proxy (1.1) ─┼──> LedgerStore (SQLite) ──> CostEngine ──> Analytics views
+  CSV import ───────────┘         ▲                      ▲
+                                  │                      │
+                          PriceTable.json        ChinaHolidays.json
+```
+
+**Targets** (`Package.swift`): `DeepTallyCore` (library) · `DeepTally` (app executable) · `dtally` (CLI) · `DeepTallyCoreTests`.
+
+**Ledger schema (SQLite, WAL)**
+
+```sql
+CREATE TABLE request (
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL,
+  source TEXT NOT NULL CHECK (source IN ('proxy','opencode','csv','manual')),
+  provider TEXT NOT NULL, model TEXT NOT NULL,
+  input INTEGER NOT NULL DEFAULT 0, output INTEGER NOT NULL DEFAULT 0,
+  reasoning INTEGER NOT NULL DEFAULT 0, cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0, cost_usd REAL NOT NULL DEFAULT 0,
+  session_id TEXT, raw_hash TEXT UNIQUE
+);
+CREATE TABLE daily (                                   -- rebuilt from request
+  date TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
+  input INTEGER, output INTEGER, reasoning INTEGER, cache_read INTEGER,
+  cost_usd REAL, request_count INTEGER, PRIMARY KEY (date, provider, model)
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- schema_version, last_balance, …
+```
+
+Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the primary store).
+
+## 5. Step-by-step
+
+### Step 0 — Repository foundation  ✅
+- [x] Create `~/Developer/deeptally`, `git init -b main`
+- [x] GPL-3.0 `LICENSE`, `README.md`, `AGENTS.md`, `CHANGELOG.md`, `.gitignore`
+- [x] `docs/PLAN.md` (this file) with the step protocol
+- [x] Git flow branches (`main`, `develop`) + gitflow config prefixes
+- [x] Public GitHub repo `genoma/deeptally`, default branch `develop`
+  **Gate:** `git log` shows the foundation commit on both branches; repo reachable on GitHub.
+
+### Step 1 — Buildable skeleton + first parallel lanes
+- [ ] `Package.swift` (macOS 15, Swift 6 mode, 4 targets), `Makefile`
+- [ ] `DeepTallyCore`: types, errors, `DeepSeekClient` (balance + models), `PriceTable` loader, `CostEngine`,
+      `PeakOffPeak`, `OpenCodeImporter`, `LedgerStore` (SQLite)
+- [ ] `DeepTally` app: `NSStatusItem` + `NSPopover` + SwiftUI popover shell; `LSUIElement`; ad-hoc bundle
+- [ ] `dtally` CLI: `--version`, `balance`, `usage --json`
+- [ ] `Scripts/bundle.sh` + `Scripts/make-icon.swift` + `Resources/AppIcon.icns` + menu bar template glyph
+- [ ] 16px-legible icon in Golden Gate style (glass squircle, depth-gauge glyph), README hero
+  **Gate:** `make build && make test && make bundle` succeed locally with CLT only; `dtally balance` prints a real balance; app shows a status item.
+  **Lanes:** ICON, PRICING, API, OPENCODE, DOCS (see §6) — parent owns Package.swift/Makefile/UI/scripts.
+
+### Step 2 — M0 spikes (evidence, not features)
+- [ ] **S1** ad-hoc `.app` → DMG → real macOS 27 Gatekeeper flow  *👤 needs user screenshots*
+- [ ] **S2** App Translocation: launch from DMG vs from `/Applications`
+- [ ] **S3** `SMAppService.mainApp.register()` under ad-hoc, in `/Applications` and `~/Applications`
+- [ ] **S4** `UNUserNotificationCenter` authorization under ad-hoc  *👤 needs an "Allow" click*
+- [ ] **S5** Keychain prompt behaviour across a rebuilt bundle (same bundle ID)
+- [x] **S6** `curl` download leaves no quarantine (verified: only `com.apple.provenance`)
+- [x] **S7** live DeepSeek probe: balance + models + usage fields (done 2026-09-24)
+  **Gate:** findings recorded in `docs/SPIKES.md` with observed output; fallbacks chosen for S3/S4 if they fail.
+
+### Step 3 — Balance, menu bar, lifecycle
+- [ ] Balance polling (15–30 min, on wake, manual), "as of" display, stale indicator
+- [ ] Low-balance notification; `UNUserNotificationCenter` with menu-bar badge fallback
+- [ ] Launch at login: `SMAppService` primary, `LaunchAgent` fallback (per S3)
+- [ ] Offline/wake handling (`NWPathMonitor`, `NSWorkspace.didWakeNotification`)
+  **Gate:** real balance visible; survives kill/restart, sleep/wake and airplane mode; login item registers on a fresh install.
+
+### Step 4 — Ledger, pricing, importer
+- [ ] `LedgerStore` + migrations + dedupe (`raw_hash`); pricing table + holiday calendar + peak/off-peak engine
+- [ ] opencode importer (read-only, feature-detected, resumable, never credential tables)
+- [ ] `dtally usage --json` and `dtally import --opencode`
+  **Gate:** cost computed for a known opencode session matches a hand-calculated value; importer is idempotent.
+
+### Step 5 — Analytics popover + exports
+- [ ] Popover: balance card, today/7d/30d spend, cache-hit %, per-model breakdown, cache sparkline
+- [ ] Menu bar metric modes (balance / today $ / cache %), thresholds; CSV export + import
+  **Gate:** cache % matches ledger query; export→import round-trips to identical rollups.
+
+### Step 6 — Release machinery + uninstaller
+- [ ] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam), `dmg.sh`, `install.sh` (hash-pinned, `--user`), **`uninstall.sh`**
+- [ ] In-app *Uninstall DeepTally…*: unregister login item, move app to Trash, purge app-support/prefs/caches, delete Keychain item, optional ledger export
+- [ ] `.github/workflows/ci.yml` (build, test, lint, SPDX-header grep, codesign verify) and `release.yml` (tag → DMG + `SHA256SUMS` + release)
+- [ ] `docs/INSTALL.md`, `docs/UNSIGNED.md`, `docs/PRIVACY.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `SECURITY.md`, `CONTRIBUTING.md`
+- [ ] Homebrew **formula** tap for `dtally` only; GitHub Immutable Releases enabled
+  **Gate:** `install → uninstall → reinstall` leaves no residue (verified with a throwaway `HOME`), and the DMG works on a second macOS version.
+
+### Step 7 — v0.1.0
+- [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
+- [ ] `docs/PLAN.md` closed out with the release link
+  **Gate:** a fresh macOS 15+/26/27 machine installs using only the published instructions.
+
+## 6. Lane assignments (for parallel subagent work)
+
+| Lane | Owns (exclusive files) | Gate |
+|---|---|---|
+| ICON | `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar template glyph, `docs/assets/hero.png`, `docs/ICON.md` | valid `.icns`, legible at 16px, `sips`-verified sizes |
+| PRICING | `Sources/DeepTallyCore/Pricing/*`, `Resources/PriceTable.json`, `Resources/ChinaHolidays.json`, `Tests/.../PricingTests.swift` | `swift test --filter Pricing` |
+| API | `Sources/DeepTallyCore/API/*`, `Tests/.../APITests.swift` (fixtures only, no network) | `swift test --filter API` |
+| OPENCODE | `Sources/DeepTallyCore/Import/OpenCode*.swift`, `Tests/.../OpenCodeTests.swift` (fixture DB) | idempotent import, no credential-table reads |
+| DOCS | `docs/INSTALL.md`, `UNSIGNED.md`, `PRIVACY.md`, `ARCHITECTURE.md`, `DEVELOPMENT.md`, `RELEASING.md`, `SECURITY.md`, `CONTRIBUTING.md` | every claim traceable to §3 evidence |
+
+Parent keeps: `Package.swift`, `Makefile`, app UI, `Scripts/*`, `.github/*`, `AGENTS.md`, this plan.
+One writer per worktree; lanes branch from `develop` and merge back with `--no-ff`.
+
+## 7. Risks
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| No usage-history API | Blind spots (other machines, web use, app closed) | Local ledger + CSV import + explicit "estimated" labelling |
+| Pricing/model churn | Wrong costs | Versioned JSON table + user override + live probe before releases |
+| Ad-hoc signing quirks | Keychain re-prompts, login-item/notification failures | Spikes S3–S5; graceful fallbacks; documented |
+| Gatekeeper friction | Install drop-off | `curl` install script (no quarantine) + screenshots for the DMG path |
+| opencode schema drift | Import breaks | Feature-detection + fixture tests + CLI `--json` escape hatch |
+| macOS 26/27 UI bugs | Silent app death | `NSStatusItem` instead of `MenuBarExtra`-only |
+| Balance is eventually-consistent | Users think it's live | "as of" timestamp, never claim real-time |
+
+## 8. Versioning & release policy
+
+SemVer, `0.y.z` until stable. `feature/*` → `develop`; `release/x.y.z` cut from `develop` (CHANGELOG freeze),
+merged `--no-ff` into `main`, tagged `vX.Y.Z`; `hotfix/*` branch from `main`, merged to both. Conventional
+Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, published with Immutable Releases on.
+
+## 9. Open decisions
+
+- [ ] Menu bar default metric (proposed: **balance**) — confirm in Step 3 with a real UI
+- [ ] Low-balance default threshold (proposed: **$2.00**)
+- [ ] Whether to publish the CLI formula to a personal tap in Step 6 (proposed: **yes**)
+- [ ] CNY display: convert or show account currency as-is (proposed: **as-is**)
+
+## 10. Progress log
+
+| Date | Step | Note |
+|---|---|---|
+| 2026-09-24 | 0 | Repo created, license/README/AGENTS/plan committed, remotes pushed |
+| 2026-09-24 | 2 | S6 (quarantine/curl) and S7 (live API probe) verified during planning |

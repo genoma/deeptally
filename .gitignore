@@ -1,0 +1,40 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# SwiftPM / Xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserdatad/
+*.xcodeproj
+*.xcworkspace
+
+# Build output
+dist/
+*.dmg
+*.zip
+*.app/
+AppIcon.iconset/
+*.iconset/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# Logs and scratch
+*.log
+.pi/
+
+# Editors
+.vscode/
+.idea/
