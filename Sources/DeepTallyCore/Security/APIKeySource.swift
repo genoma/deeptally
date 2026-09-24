@@ -39,6 +39,39 @@ public enum KeyImportError: Error, Sendable, Equatable {
   case keychain(OSStatus)
 }
 
+/// The key a request will use, where it came from, and whether reading the Keychain went wrong.
+///
+/// One value rather than a key-or-error pair, so a failed Keychain read can be reported *and* a
+/// usable `DEEPSEEK_API_KEY` still be used: a locked keychain or a denied item ACL must not hide a
+/// key that is sitting right there in the environment.
+public struct KeyResolution: Sendable, Equatable {
+  /// The source that produced ``key``.
+  public enum Origin: Sendable, Equatable {
+    /// The Keychain held a usable secret.
+    case keychain
+    /// `DEEPSEEK_API_KEY` was set and not blank.
+    case environment
+    /// Neither source had a key.
+    case none
+  }
+
+  public let origin: Origin
+  /// The secret itself, or `nil` when ``origin`` is `.none`.
+  public let key: String?
+  /// Why the Keychain read failed, as a sentence carrying the status only — never the secret.
+  ///
+  /// Set even when ``origin`` is `.environment`, because then both facts are true and a caller may
+  /// want to say both.
+  public let keychainProblem: String?
+
+  /// Public so the app target can build previews and fixtures without testability access.
+  public init(origin: Origin, key: String?, keychainProblem: String?) {
+    self.origin = origin
+    self.key = key
+    self.keychainProblem = keychainProblem
+  }
+}
+
 /// Resolves the DeepSeek API key for a request: Keychain first, then the process environment.
 ///
 /// A GUI-launched app inherits no shell environment (measured, docs/SPIKES.md), so the key is
@@ -47,31 +80,73 @@ public struct APIKeySource: Sendable {
   /// Injection seam for tests: a non-nil runner replaces the real login-shell process entirely.
   public typealias ShellRunner = @Sendable (ShellKind, TimeInterval) throws -> String
 
+  /// Injection seam for tests: replaces the Keychain read, which is the only way to exercise a
+  /// locked keychain (`errSecInteractionNotAllowed`) or a denied item ACL without provoking one.
+  public typealias KeychainReader = @Sendable () throws -> String?
+
   private let keychain: KeychainStore
   private let environment: [String: String]
   private let shellRunner: ShellRunner?
+  private let keychainReader: KeychainReader
 
   public init(
     keychain: KeychainStore = KeychainStore(),
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    shellRunner: ShellRunner? = nil
+    shellRunner: ShellRunner? = nil,
+    keychainReader: KeychainReader? = nil
   ) {
     self.keychain = keychain
     self.environment = environment
     self.shellRunner = shellRunner
+    self.keychainReader = keychainReader ?? { try keychain.read() }
+  }
+
+  /// The key for a request, where it came from, and why the Keychain read failed — one call, so the
+  /// failure is never a reason to discard a usable environment key.
+  ///
+  /// `read()` throws for a locked keychain (`errSecInteractionNotAllowed`) and for a denied item ACL
+  /// (`errSecAuthFailed`); both used to abort resolution and report "unreadable" while
+  /// `DEEPSEEK_API_KEY` sat in the environment. The failure now travels in
+  /// ``KeyResolution/keychainProblem`` and the environment is still consulted.
+  public func resolve() -> KeyResolution {
+    var keychainProblem: String?
+    do {
+      if let stored = try keychainReader(),
+        !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      {
+        return KeyResolution(origin: .keychain, key: stored, keychainProblem: nil)
+      }
+    } catch {
+      keychainProblem = Self.keychainProblemText(error)
+    }
+    let value = environment["DEEPSEEK_API_KEY"]?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let value, !value.isEmpty else {
+      return KeyResolution(origin: .none, key: nil, keychainProblem: keychainProblem)
+    }
+    return KeyResolution(origin: .environment, key: value, keychainProblem: keychainProblem)
   }
 
   /// The key to use for a request. Never runs a shell — importing is an explicit user action, and a
   /// GUI process cannot rely on `~/.zshrc` being read.
+  ///
+  /// A thin wrapper over ``resolve()``, kept for callers that want nothing else; a Keychain read
+  /// failure is a diagnostic rather than a reason to ignore the environment, so it is not thrown.
   public func currentKey() throws -> String? {
-    if let stored = try keychain.read(),
-      !stored.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    {
-      return stored
+    resolve().key
+  }
+
+  /// A Keychain read failure as a sentence: the raw status is kept, because it is what tells a
+  /// locked keychain from a denied ACL, and no part of the secret is, because the error never held
+  /// one.
+  private static func keychainProblemText(_ error: any Error) -> String {
+    guard let keychain = error as? KeychainError else { return String(describing: error) }
+    switch keychain {
+    case .unexpectedStatus(let status):
+      return "the Keychain could not be read (OSStatus \(status))"
+    case .invalidSecret:
+      return "the stored Keychain item is not a usable secret"
     }
-    guard let raw = environment["DEEPSEEK_API_KEY"] else { return nil }
-    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    return value.isEmpty ? nil : value
   }
 
   /// Imports the key from the user's login shell, stores it in the Keychain and returns it, so the
