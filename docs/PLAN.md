@@ -138,10 +138,10 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [x] `PriceTable` loader, `PeakOffPeak`, `CostEngine` + holiday calendar *(lane PRICING — 32 tests; independently cross-checked against a Python reference over 2268 comparisons, 0 mismatches)*
 - [x] usage/SSE parsing + error mapping *(lane API — 21 tests)*
 - [x] opencode importer *(lane OPENCODE — 14 tests, read-only, credential-table DENY authorizer, union of both generations)*
-- [x] `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar glyph, README hero *(lane ICON — deterministic generator, 10 iconset sizes, template glyph)*
+- [x] `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar **gauge** template glyph, README hero *(lane ICON — deterministic generator, 10 iconset sizes; ~40 glyph variants measured, gauge chosen over bars because descending bars read as signal strength next to Wi-Fi/battery; evidence: `docs/assets/menubar-glyph-comparison.png`)*
 - [x] `docs/` set: INSTALL, UNSIGNED, PRIVACY, ARCHITECTURE, DEVELOPMENT, RELEASING + SECURITY/CONTRIBUTING *(lane DOCS — 63 links verified, commands checked against the Makefile)*
 - [ ] Wire the pricing engine + opencode importer into the ledger and CLI (`LedgerStore`, `deeptally usage`) — Step 4
-- [ ] Holiday calendar still ships empty: fill the official 2026 CN State Council dates (needs a web lookup)
+- [x] Holiday calendar: official 2026 CN State Council dates (33 days, 国办发明电〔2025〕7号) shipped in `ChinaHolidays.json`; prior years are not included — user override available
 - [ ] Decide the API lane's `DeepSeekAPIError` vs `DeepSeekClient.APIError` duplication at wiring time
   **Gate:** `make build && make test && make bundle` pass with CLT only ✅ 2026-09-24 · `deeptally balance` prints a real balance ✅ · status item visible ⏳ needs a human look.
   **Lanes:** ICON, PRICING, API, OPENCODE, DOCS (see §6) — parent owns Package.swift/Makefile/UI/scripts.
@@ -242,3 +242,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 1 | Traps fixed + documented: APFS case-insensitivity merged `DeepTally`/`deeptally` paths; CLT needs `-plugin-path .../plugins/testing` for swift-testing macros |
 | 2026-09-24 | 1 | Five lanes merged (icon, pricing, api, opencode, docs): 41 files, 72 tests in 14 suites, lint clean, bundle signed |
 | 2026-09-24 | 1 | opencode importer evidence: both schema generations live with disjoint rows (2590 / 1062 / 1638 overlap); union rule adopted, 0 divergent counters |
+| 2026-09-24 | 1 | Menu bar glyph revised to a gauge after a measured bars-vs-gauge comparison; app icon/hero byte-identical across the revision |
+| 2026-09-24 | 1 | `ChinaHolidays.json` filled with the official 2026 State Council list (33 days) + integration test on shipped data |

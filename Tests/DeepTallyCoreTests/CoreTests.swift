@@ -106,3 +106,38 @@ struct PriceTableTests {
     #expect(table.price(forModel: "does-not-exist") == nil)
   }
 }
+
+@Suite("Shipped pricing + holiday data")
+struct ShippedDataTests {
+  private func instant(_ iso: String) -> Date {
+    ISO8601DateFormatter().date(from: iso)!
+  }
+
+  private func engine() throws -> PeakOffPeakEngine {
+    let table = try PriceTableLoader().loadBundled()
+    let holidays = try HolidayCalendar.loadBundled()
+      .merging(HolidayCalendar(source: "PriceTable.json", dates: table.holidays))
+    return PeakOffPeakEngine(table: table, holidayCalendar: holidays)
+  }
+
+  @Test("a weekday inside a shipped public holiday is off-peak")
+  func holidayOverridesWeekday() throws {
+    // 2026-10-01 is a Thursday inside the 01:00-04:00Z peak window, but National Day in the
+    // shipped State Council list, so it must price as off-peak.
+    let snapshot = try engine().classify(instant("2026-10-01T02:00:00Z"))
+
+    #expect(snapshot.isHoliday)
+    #expect(snapshot.period == .offPeak)
+    #expect(snapshot.multiplier == Decimal(string: "0.5"))
+  }
+
+  @Test("an ordinary weekday in the same window is peak")
+  func ordinaryWeekdayIsPeak() throws {
+    // 2026-09-24 is a Thursday and not a public holiday.
+    let snapshot = try engine().classify(instant("2026-09-24T02:00:00Z"))
+
+    #expect(!snapshot.isHoliday)
+    #expect(snapshot.period == .peak)
+    #expect(snapshot.multiplier == 1)
+  }
+}
