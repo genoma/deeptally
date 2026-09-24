@@ -11,13 +11,18 @@ import Observation
 /// Four rules this type exists to keep:
 /// - a refresh never runs twice at once, and the next one always comes from `PollingPlan`
 ///   (interval, then backoff, then jitter) rather than from a hand-rolled timer chain;
-/// - nothing blocking runs on the main actor: importing a key is the one blocking call in the app and
-///   it runs in a detached task;
+/// - nothing blocking runs on the main actor: importing a key and every ledger pass are the two
+///   blocking kinds of work in the app and both run off it (the ledger lives in ``LocalUsageLedger``);
 /// - the API key leaves the Keychain only as the `Bearer` argument of one request. It is never
 ///   logged, never written to `UserDefaults`, and never displayed (AGENTS.md §5);
 /// - a low-balance alert is remembered as delivered only after macOS accepted it, so a denial or a
 ///   failed post is retried instead of consuming the cooldown; while macOS will not deliver alerts,
 ///   the menu bar carries the warning glyph and the popover says so once.
+///
+/// Local usage is imported for the same reason the balance is polled: the numbers have to be live
+/// without the user doing anything. It is a separate, fixed cadence, it never touches the balance
+/// path, and every failure of it is quiet — at most the settings panel says local usage is not being
+/// imported yet.
 @MainActor
 @Observable
 final class AppModel {
@@ -44,6 +49,11 @@ final class AppModel {
   private(set) var isImportingKey = false
   private(set) var importMessage: String?
   private(set) var loginItemStatus: LoginItem.Status = .notRegistered
+  /// The last good reading of the ledger, or `nil` until a pass has successfully read it.
+  private(set) var localUsage: LocalUsageMetrics?
+  /// Why the last ledger pass could not import, or `nil` when it did. Rendered only as the quiet
+  /// note in ``localUsageNote``; a missing opencode database is never a banner.
+  private(set) var localUsageProblem: String?
 
   /// Written by `SettingsPanel` through `@Bindable`; every write is validated, persisted and acted
   /// on in ``settingsDidChange(from:)``.
@@ -65,6 +75,16 @@ final class AppModel {
   private let scheduling: any AppScheduling
   /// Injection seam: the login item. See ``LoginItemControl``.
   private let loginItem: LoginItemControl
+  /// The one owner of the ledger. Injected so the app-layer tests can hand in a source they drive
+  /// instead of the developer's opencode database; see ``LocalUsageLedger``.
+  private let localUsageLedger: LocalUsageLedger
+  /// The calendar every local day boundary is computed with; see ``AppEnvironment/calendar``.
+  private let calendar: Calendar
+  /// The currency the ledger prices in, for the spend metric. The table's, never the account's.
+  private let ledgerCurrency: String
+  /// `true` while a ledger pass is running, so a trigger that arrives mid-pass is skipped rather than
+  /// queued: the fifteen-minute tick must not join a launch scan of a large database.
+  private(set) var isLocalUsageRefreshing = false
   /// Injection seam: the wall clock. The app reads `Date()`; a test moves it, so "stale after an
   /// hour" and "the cooldown has elapsed" are assertions rather than waits.
   private let now: @MainActor () -> Date
@@ -103,7 +123,8 @@ final class AppModel {
     scheduling: any AppScheduling = TaskAppScheduler(),
     loginItem: LoginItemControl = .system,
     now: @escaping @MainActor () -> Date = { Date() },
-    jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) }
+    jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
+    localUsageLedger: LocalUsageLedger? = nil
   ) {
     self.environment = environment
     self.scheduler = scheduler
@@ -111,6 +132,9 @@ final class AppModel {
     self.loginItem = loginItem
     self.now = now
     self.jitterFraction = jitterFraction
+    self.localUsageLedger = localUsageLedger ?? environment.makeLocalUsageLedger()
+    self.calendar = environment.calendar
+    self.ledgerCurrency = environment.priceTable.currency
     let settings = environment.settingsStore.load()
     self.settings = settings
     self.monitor = environment.balanceMonitor(lowBalanceThreshold: settings.lowBalanceThreshold)
@@ -138,6 +162,7 @@ final class AppModel {
       installNetworkObserver()
     }
     startTicker()
+    startLocalUsage()
     if settings.notificationsEnabled {
       Task { await requestNotificationPermission() }
     }
@@ -507,21 +532,78 @@ final class AppModel {
       cooldownMinutes: validated.notificationCooldownMinutes)
     evaluate()
     scheduleNextRefresh()
+    // A metric the ledger backs must not wait for the next import tick to get its first number.
+    if validated.menuBarMetric != .balance, localUsage == nil {
+      refreshLocalUsage()
+    }
     if validated.notificationsEnabled, !previous.notificationsEnabled {
       Task { await requestNotificationPermission() }
     }
   }
 
+  /// The ledger pass, once at launch and every fifteen minutes after it. A separate, fixed cadence:
+  /// it is a local file read, and "why did my spend not update?" is worse than a number that lags by
+  /// a few minutes. It runs even while the balance metric is selected, so switching metric never
+  /// waits for the next tick.
+  private func startLocalUsage() {
+    scheduling.startLedgerTicker(every: Self.localUsageIntervalSeconds) { [weak self] in
+      self?.refreshLocalUsage()
+    }
+    refreshLocalUsage()
+  }
+
+  /// Runs one import-and-query pass. The SQLite work belongs to ``LocalUsageLedger``'s actor, so
+  /// nothing here can block the UI; the main actor only records what came back.
+  ///
+  /// A pass is skipped while one is already in flight, so the fifteen-minute tick cannot join a
+  /// launch scan that is still reading the opencode database.
+  func refreshLocalUsage() {
+    guard !isLocalUsageRefreshing else { return }
+    isLocalUsageRefreshing = true
+    let now = self.now()
+    let calendar = self.calendar
+    let ledger = localUsageLedger
+    Task { [weak self] in
+      let outcome = await ledger.refresh(now: now, calendar: calendar)
+      guard let self else { return }
+      self.isLocalUsageRefreshing = false
+      self.localUsageProblem = outcome.importProblem
+      // A failed pass keeps the last good numbers: blanking them would turn a transient unreadable
+      // file into "you spent nothing".
+      if let metrics = outcome.metrics { self.localUsage = metrics }
+    }
+  }
+
   // MARK: - Menu bar
 
-  /// The menu bar title. Step 3 has no ledger, so the balance is the only metric with a value; the
-  /// other two are an em dash until Step 4 gives them one. A number the app does not have is never
-  /// shown.
+  /// The menu bar title. Every mode has a number behind it: the balance comes from the API, the other
+  /// two from the ledger. A number the app does not have is never shown — an em dash is honest, a
+  /// fabricated zero is not.
   var menuBarLabel: String {
     switch settings.menuBarMetric {
     case .balance: return balanceState?.amountText ?? "—"
-    case .todaySpend, .cacheHitRate: return "—"
+    case .todaySpend: return todaySpendText ?? "—"
+    case .cacheHitRate: return cacheHitRateText
     }
+  }
+
+  /// Today's spend over the current local day, formatted the way the balance is. `nil` until a read of
+  /// the ledger has succeeded, since a failed pass has no business claiming `$0.00`.
+  var todaySpendText: String? {
+    localUsage.map { MetricFormatting.spend($0.todaySpendUSD, currency: ledgerCurrency) }
+  }
+
+  /// Cache hits over prompt tokens for the trailing 30 days; an em dash when the window recorded no
+  /// prompt tokens (or none at all yet).
+  var cacheHitRateText: String {
+    MetricFormatting.cacheHitPercent(localUsage?.cacheHitRatio)
+  }
+
+  /// The one line the settings panel shows while local usage is not being imported. Quiet on
+  /// purpose: a missing opencode database or an unwritable ledger is not something the user has to
+  /// fix for the balance, the alerts or the rate panel to keep working.
+  var localUsageNote: String? {
+    localUsageProblem == nil ? nil : "Local usage is not being imported yet."
   }
 
   /// Everything the status item's button shows, derived in one place so the menu bar and
@@ -651,6 +733,9 @@ final class AppModel {
   /// The countdown is rendered in whole minutes, so half a minute is the smallest tick that can
   /// change it.
   private static let tickerSeconds = 30
+  /// How often local usage is imported: at launch, then every fifteen minutes. Fixed, not a setting —
+  /// it is a local file read, and the point is that the metrics are live without user action.
+  static let localUsageIntervalSeconds: TimeInterval = 15 * 60
   /// `PollingPlan` doubles the wait per attempt and caps it; this keeps the counter small enough that
   /// the exponent cannot run away.
   private static let maximumBackoffAttempt = 8
