@@ -138,6 +138,8 @@ struct AppEnvironment: Sendable {
       return "the off-peak multiplier \(value) is not in (0, 1]."
     case .invalidPeakWindow(let start, let end):
       return "the peak window \(start)-\(end) UTC is not a valid hour range."
+    case .duplicateAlias(let alias):
+      return "the alias \"\(alias)\" is listed on more than one model."
     }
   }
 }

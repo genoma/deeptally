@@ -14,6 +14,8 @@ public enum PricingDataError: Swift.Error, Equatable, Sendable {
   case invalidOffPeakMultiplier(Decimal)
   /// A peak window must satisfy `0 <= start < end <= 24`.
   case invalidPeakWindow(startHourUTC: Int, endHourUTC: Int)
+  /// The same alias is listed twice, so which row it resolves to would depend on table order.
+  case duplicateAlias(alias: String)
 }
 
 /// Loads the versioned price table.
@@ -138,6 +140,8 @@ public struct PriceTableLoader: Sendable {
       return "the off-peak multiplier \(value) is not in (0, 1]"
     case .invalidPeakWindow(let start, let end):
       return "the peak window \(start)-\(end) UTC is not a valid hour range"
+    case .duplicateAlias(let alias):
+      return "the alias \"\(alias)\" is listed on more than one model"
     }
   }
 
@@ -165,6 +169,14 @@ public struct PriceTableLoader: Sendable {
       else {
         throw PricingDataError.invalidPeakWindow(
           startHourUTC: window.startHourUTC, endHourUTC: window.endHourUTC)
+      }
+    }
+    // An alias claimed by two rows would be priced by table order, which no reader of the file can
+    // see. Rejecting the table is loud; falling back to the bundled one prices correctly.
+    var claimedAliases: Set<String> = []
+    for price in table.models {
+      for alias in price.aliases where !claimedAliases.insert(alias).inserted {
+        throw PricingDataError.duplicateAlias(alias: alias)
       }
     }
   }
