@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import PackageDescription
 
+// Command Line Tools ships swift-testing's macro plugin in plugins/testing/, which the compiler
+// driver does not search by default (Xcode installs it in plugins/). Harmless extra search path on
+// machines where it does not exist. Spelled out per test target and not shared through one variable:
+// a shared `SwiftSetting` list made SwiftPM drop the flag from one of the two targets.
 let package = Package(
     name: "DeepTally",
     platforms: [
@@ -30,9 +34,19 @@ let package = Package(
             name: "DeepTallyCoreTests",
             dependencies: ["DeepTallyCore"],
             swiftSettings: [
-                // Command Line Tools ships swift-testing's macro plugin in plugins/testing/, which the
-                // compiler driver does not search by default (Xcode installs it in plugins/).
-                // Harmless extra search path on machines where it does not exist.
+                .unsafeFlags([
+                    "-plugin-path",
+                    "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+                ])
+            ]
+        ),
+        // The app target is an executable, and SwiftPM links it into the test bundle anyway, so the app
+        // layer is tested in place: no library extraction, no duplicated seam types. Verified on this
+        // machine's CLT-only toolchain — `swift test` builds and runs this target.
+        .testTarget(
+            name: "DeepTallyAppTests",
+            dependencies: ["DeepTallyApp", "DeepTallyCore"],
+            swiftSettings: [
                 .unsafeFlags([
                     "-plugin-path",
                     "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",

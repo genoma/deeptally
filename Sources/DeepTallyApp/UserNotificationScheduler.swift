@@ -17,6 +17,22 @@ enum AlertAuthorization: Sendable, Equatable {
   case unknown
 }
 
+/// The alert side of the notification centre, as `AppModel` needs it: ask once, read what macOS
+/// reports, and post the low-balance alert.
+///
+/// The cooldown rule this feeds is a decision the app makes — only an alert macOS accepted may
+/// consume the cooldown — so "denied" and "the post itself failed" have to be reachable. A protocol
+/// is what lets a test say which of the two happened instead of provoking it on a real machine.
+@MainActor
+protocol LowBalanceAlerting: AnyObject {
+  /// Asks once, at launch. `false` means alerts are off — denied, or not yet answered.
+  func requestAuthorization() async -> Bool
+  /// The authorization macOS reports right now.
+  func authorization() async -> AlertAuthorization
+  /// Posts the alert and reports whether macOS **accepted** it for delivery.
+  func postLowBalance(amountText: String, threshold: String) async -> Bool
+}
+
 /// The one place that talks to the notification centre.
 ///
 /// Authorization was measured to work for the ad-hoc bundle (docs/SPIKES.md S4: the system prompt
@@ -75,3 +91,5 @@ final class UserNotificationScheduler {
     }
   }
 }
+
+extension UserNotificationScheduler: LowBalanceAlerting {}
