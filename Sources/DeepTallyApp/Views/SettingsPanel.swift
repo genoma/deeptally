@@ -13,6 +13,9 @@ struct SettingsPanel: View {
   @Binding private var settings: AppSettings
   private let isImportingKey: Bool
   private let importMessage: String?
+  /// Alerts are switched on but macOS reports them denied: the one calm line that says so, and what
+  /// carries a low balance instead.
+  private let alertsUnavailable: Bool
   private let onImportFromShell: (ShellKind) -> Void
   private let onDeleteKey: () -> Void
 
@@ -20,12 +23,14 @@ struct SettingsPanel: View {
     settings: Binding<AppSettings>,
     isImportingKey: Bool,
     importMessage: String?,
+    alertsUnavailable: Bool = false,
     onImportFromShell: @escaping (ShellKind) -> Void,
     onDeleteKey: @escaping () -> Void
   ) {
     _settings = settings
     self.isImportingKey = isImportingKey
     self.importMessage = importMessage
+    self.alertsUnavailable = alertsUnavailable
     self.onImportFromShell = onImportFromShell
     self.onDeleteKey = onDeleteKey
   }
@@ -45,6 +50,13 @@ struct SettingsPanel: View {
       VStack(alignment: .leading, spacing: 8) {
         notificationsRow
         cooldownRow
+        if alertsUnavailable {
+          Text(Self.alertsUnavailableNote)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel("Low-balance alerts cannot be delivered")
+        }
       }
 
       VStack(alignment: .leading, spacing: 8) {
@@ -159,6 +171,13 @@ struct SettingsPanel: View {
     .disabled(!settings.notificationsEnabled)
   }
 
+  /// Stated once, calmly, and only while it is true: the menu-bar warning glyph is the fallback, so
+  /// a low balance stays visible even when macOS will not deliver the alert.
+  private static let alertsUnavailableNote =
+    "macOS notifications are off for DeepTally, so low-balance alerts are not delivered. While the "
+    + "balance is low the menu bar shows a warning glyph; re-allow DeepTally in System Settings → "
+    + "Notifications to get the alert."
+
   /// Whole hours once the cooldown passes an hour, because "720 min" is a number nobody reads.
   private static func cooldownText(_ minutes: Int) -> String {
     guard minutes >= 60 else { return "\(minutes) min" }
@@ -231,13 +250,24 @@ struct SettingsPanelPreviews: PreviewProvider {
   /// plugin macro, unavailable to a Command Line Tools build just like `#Preview`. The controls are
   /// therefore inert in the canvas; the real binding comes from the app.
   static var previews: some View {
-    SettingsPanel(
-      settings: .constant(AppSettings.default),
-      isImportingKey: false,
-      importMessage: "Imported a key from zsh.",
-      onImportFromShell: { _ in },
-      onDeleteKey: {}
-    )
+    VStack(alignment: .leading, spacing: 20) {
+      SettingsPanel(
+        settings: .constant(AppSettings.default),
+        isImportingKey: false,
+        importMessage: "Imported a key from zsh.",
+        onImportFromShell: { _ in },
+        onDeleteKey: {}
+      )
+      Divider()
+      SettingsPanel(
+        settings: .constant(AppSettings.default),
+        isImportingKey: false,
+        importMessage: nil,
+        alertsUnavailable: true,
+        onImportFromShell: { _ in },
+        onDeleteKey: {}
+      )
+    }
     .padding(14)
     .frame(width: 320)
   }
