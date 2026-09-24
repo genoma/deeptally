@@ -47,13 +47,26 @@ public struct PriceTableLoader: Sendable {
   /// The override when present and valid, otherwise the bundled table.
   ///
   /// A present-but-broken override is ignored rather than fatal: a typo in a user file must not stop
-  /// the app from pricing requests. `loadOverride()` still reports that failure to callers that want
-  /// to surface it.
+  /// the app from pricing requests. The reason is dropped here — a caller that has somewhere to show
+  /// it calls ``loadWithDiagnostics()`` instead.
   public func load() throws -> PriceTable {
-    if let override = try? loadOverride() {
-      return override
+    try loadWithDiagnostics().table
+  }
+
+  /// The table to price with, plus why a user override was not used.
+  ///
+  /// A valid override wins. A present-but-broken override — unreadable file, invalid JSON, failed
+  /// validation — yields the bundled table and a sentence naming the file and the reason, so a
+  /// caller can surface it. The bundled file is the last resort, so a failure there is still thrown.
+  public func loadWithDiagnostics() throws -> (table: PriceTable, overrideProblem: String?) {
+    let override: PriceTable?
+    do {
+      override = try loadOverride()
+    } catch {
+      return (try loadBundled(), Self.overrideProblem(at: overrideURL, error: error))
     }
-    return try loadBundled()
+    guard let override else { return (try loadBundled(), nil) }
+    return (override, nil)
   }
 
   /// The bundled table, ignoring any override.
@@ -82,6 +95,32 @@ public struct PriceTableLoader: Sendable {
       throw PricingDataError.resourceMissing(name: path)
     }
     return try Self.decode(data, name: overrideURL.lastPathComponent)
+  }
+
+  /// A rejected override as one sentence: which file, and why it was not used. The full path is
+  /// named rather than the file name, because the location is the actionable part.
+  static func overrideProblem(at url: URL, error: any Error) -> String {
+    let path = url.path(percentEncoded: false)
+    return "Ignoring the price override at \(path): \(reason(for: error))."
+      + " Using the bundled price table."
+  }
+
+  /// The reason half of ``overrideProblem(at:error:)``. A decode failure keeps its detail, which
+  /// names the offending field — the one thing a user editing the file needs.
+  static func reason(for error: any Error) -> String {
+    guard let pricing = error as? PricingDataError else { return String(describing: error) }
+    switch pricing {
+    case .resourceMissing:
+      return "the file is missing or unreadable"
+    case .decodeFailed(_, let detail):
+      return "the file is not valid JSON for the price-table schema (\(detail))"
+    case .noModels:
+      return "the table lists no models"
+    case .invalidOffPeakMultiplier(let value):
+      return "the off-peak multiplier \(value) is not in (0, 1]"
+    case .invalidPeakWindow(let start, let end):
+      return "the peak window \(start)-\(end) UTC is not a valid hour range"
+    }
   }
 
   /// Decodes and validates one table. `name` only appears in thrown errors.
