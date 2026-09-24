@@ -7,8 +7,9 @@
 // Writes (deterministic: no randomness, no timers, no network, no date-dependent output):
 //   dist/icon/AppIcon.iconset/                      the 10 canonical iconset PNGs (dist/ is git-ignored)
 //   Resources/AppIcon.icns                          via /usr/bin/iconutil (committed: actool needs Xcode)
-//   Resources/MenuBarIconTemplate.png, ...@2x.png   black + alpha status-item glyphs
+//   Resources/MenuBarIconTemplate.png, ...@2x.png   black + alpha status-item glyphs (gauge)
 //   docs/assets/hero.png                            1200x400 README hero
+//   docs/assets/menubar-glyph-comparison.png        1200x920 glyph-choice evidence strip
 //
 // The script verifies its own output (sizes, template purity, non-blank hero) and exits non-zero on any
 // mismatch. Design rationale and exact hex values: docs/ICON.md — keep the palette in sync.
@@ -42,6 +43,12 @@ private enum Palette {
   static let ink: UInt32 = 0xEAF2FF
   static let wordTeal: UInt32 = 0x4DE3CE
   static let steel: UInt32 = 0x8FA6CC
+
+  // Comparison strip (glyph review sheet).
+  static let sheetBackground: UInt32 = 0x101521
+  static let sheetLightBar: UInt32 = 0xF1F3F7
+  static let sheetDarkBar: UInt32 = 0x16181D
+  static let sheetLightInk: UInt32 = 0x1B2438
 }
 
 // MARK: - Locations
@@ -54,6 +61,8 @@ private let menuBarGlyphURL = repoRoot.appendingPathComponent("Resources/MenuBar
 private let menuBarGlyph2xURL = repoRoot.appendingPathComponent(
   "Resources/MenuBarIconTemplate@2x.png")
 private let heroURL = repoRoot.appendingPathComponent("docs/assets/hero.png")
+private let comparisonURL = repoRoot.appendingPathComponent(
+  "docs/assets/menubar-glyph-comparison.png")
 
 // MARK: - Failures
 
@@ -357,9 +366,47 @@ private func drawDial(in cg: CGContext) {
 
 // MARK: - Menu bar template glyph
 
-/// Three descending tally bars — a depth chart, drawn in a 16×16 design space on whole pixels so the
-/// 16 px bitmap stays crisp. Pure black + alpha so macOS can tint it for light and dark menu bars.
-private func drawMenuBarGlyph(_ cg: CGContext, pixels: Int) {
+/// Shipped menu bar glyph: the app icon's dial reduced to a thin ring with a bottom gap, a needle and a
+/// pivot hub, drawn in a 16×16 design space. A 16 px arc+needle only survives when the ring is thin:
+/// a bold 2 px band swallows the needle into one blob. Pure black + alpha so macOS can tint it for
+/// light and dark menu bars.
+private func drawMenuBarGauge(_ cg: CGContext, pixels: Int) {
+  cg.saveGState()
+  cg.scaleBy(x: CGFloat(pixels) / 16, y: CGFloat(pixels) / 16)
+  defer { cg.restoreGState() }
+
+  let center = CGPoint(x: 8, y: 6.35)
+  let radius: CGFloat = 5.6
+  let thickness: CGFloat = 1.5
+  // Ring open at the bottom (gap centred on -90°), the way the app icon's dial opens, so the glyph
+  // stays symmetric and reads as a dial rather than a "C".
+  let sweepStart = -65 * CGFloat.pi / 180
+  let sweepEnd = 245 * CGFloat.pi / 180
+  let needleAngle = 60 * CGFloat.pi / 180
+
+  let ring = CGMutablePath()
+  ring.addArc(
+    center: center, radius: radius, startAngle: sweepStart, endAngle: sweepEnd, clockwise: false)
+  stroke(ring, color: NSColor.black, width: thickness, cap: .round, in: cg)
+
+  let needleEnd = CGPoint(
+    x: center.x + cos(needleAngle) * 3.7, y: center.y + sin(needleAngle) * 3.7)
+  let needle = CGMutablePath()
+  needle.move(to: center)
+  needle.addLine(to: needleEnd)
+  stroke(needle, color: NSColor.black, width: 1.5, cap: .round, in: cg)
+
+  fill(
+    CGPath(
+      ellipseIn: CGRect(x: center.x - 1.2, y: center.y - 1.2, width: 2.4, height: 2.4),
+      transform: nil),
+    color: NSColor.black, in: cg)
+}
+
+/// Previous shipped glyph, kept only so `docs/assets/menubar-glyph-comparison.png` can show both
+/// options: three descending tally bars. Crisp at 16 px, but next to Wi-Fi and battery descending bars
+/// read as a signal/level indicator — the misread risk that motivated the gauge.
+private func drawMenuBarTally(_ cg: CGContext, pixels: Int) {
   cg.saveGState()
   cg.scaleBy(x: CGFloat(pixels) / 16, y: CGFloat(pixels) / 16)
   defer { cg.restoreGState() }
@@ -374,6 +421,150 @@ private func drawMenuBarGlyph(_ cg: CGContext, pixels: Int) {
       roundedRect: bar, cornerWidth: bar.height / 2, cornerHeight: bar.height / 2, transform: nil)
     fill(path, color: NSColor.black, in: cg)
   }
+}
+
+// MARK: - Glyph comparison sheet
+
+/// Draws into the current NSGraphicsContext, which `render` sets up.
+private func drawText(_ string: String, font: NSFont, color textColor: NSColor, at point: CGPoint) {
+  NSAttributedString(string: string, attributes: [.font: font, .foregroundColor: textColor])
+    .draw(at: point)
+}
+
+/// Magnified copy of a black + alpha template bitmap repainted in `tint`, which is what macOS does to a
+/// template image — so the dark-band preview shows the glyph the way users actually see it.
+private func tinted(_ image: CGImage, scale: CGFloat, tint: NSColor) -> CGImage {
+  let width = Int(CGFloat(image.width) * scale)
+  let height = Int(CGFloat(image.height) * scale)
+  guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+    let context = CGContext(
+      data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+  else {
+    fail("could not build a tinted glyph")
+  }
+  context.interpolationQuality = .none
+  context.setFillColor(tint.cgColor)
+  context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+  context.setBlendMode(.destinationIn)
+  context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+  guard let result = context.makeImage() else {
+    fail("could not build a tinted glyph")
+  }
+  return result
+}
+
+/// Review sheet for the menu bar glyph choice: bars vs gauge, each at 16 px and 32 px, magnified 8×
+/// with nearest-neighbour sampling so the raster that actually ships is what gets judged, on both a
+/// light and a dark menu bar background, plus both glyphs at native size.
+private func drawGlyphComparison(_ cg: CGContext, pixelsWide: Int, pixelsHigh: Int) {
+  let width = CGFloat(pixelsWide)
+  let height = CGFloat(pixelsHigh)
+  let magnification: CGFloat = 8
+
+  let candidates: [(label: String, image: CGImage)] = [
+    (
+      "bars · 16 px",
+      render(pixelsWide: 16, pixelsHigh: 16) { drawMenuBarTally($0, pixels: 16) }.image()
+    ),
+    (
+      "bars · 32 px",
+      render(pixelsWide: 32, pixelsHigh: 32) { drawMenuBarTally($0, pixels: 32) }.image()
+    ),
+    (
+      "gauge · 16 px",
+      render(pixelsWide: 16, pixelsHigh: 16) { drawMenuBarGauge($0, pixels: 16) }.image()
+    ),
+    (
+      "gauge · 32 px",
+      render(pixelsWide: 32, pixelsHigh: 32) { drawMenuBarGauge($0, pixels: 32) }.image()
+    ),
+  ]
+
+  fill(
+    CGPath(rect: CGRect(x: 0, y: 0, width: width, height: height), transform: nil),
+    color: color(Palette.sheetBackground), in: cg)
+
+  let margin: CGFloat = 40
+  let sheetWidth = width - 2 * margin
+  let columnWidth = sheetWidth / CGFloat(candidates.count)
+  let columnCenters = candidates.indices.map { margin + (CGFloat($0) + 0.5) * columnWidth }
+  let labelFont = NSFont.systemFont(ofSize: 18, weight: .medium)
+
+  drawText(
+    "Menu bar glyph: bars vs gauge", font: NSFont.systemFont(ofSize: 30, weight: .bold),
+    color: color(Palette.ink), at: CGPoint(x: margin + 8, y: height - 60))
+  drawText(
+    "16×16 and 32×32 template PNGs, pure black + alpha, 8× nearest-neighbour, tinted by macOS",
+    font: NSFont.systemFont(ofSize: 18, weight: .regular), color: color(Palette.steel),
+    at: CGPoint(x: margin + 8, y: height - 92))
+  drawText(
+    "Shipped: gauge — the thin ring keeps the needle readable at 16 px; bars read as signal strength",
+    font: labelFont, color: color(Palette.wordTeal), at: CGPoint(x: margin + 8, y: height - 118))
+
+  let bandHeight: CGFloat = 300
+  let footerHeight: CGFloat = 90
+  let bandGap: CGFloat = 20
+  let footer = CGRect(x: margin, y: 10, width: sheetWidth, height: footerHeight)
+  let darkBand = CGRect(x: margin, y: footer.maxY + bandGap, width: sheetWidth, height: bandHeight)
+  let lightBand = CGRect(
+    x: margin, y: darkBand.maxY + bandGap, width: sheetWidth, height: bandHeight)
+
+  for (index, candidate) in candidates.enumerated() {
+    let labelWidth = NSAttributedString(string: candidate.label, attributes: [.font: labelFont])
+      .size().width
+    drawText(
+      candidate.label, font: labelFont, color: color(Palette.steel),
+      at: CGPoint(x: columnCenters[index] - labelWidth / 2, y: lightBand.maxY + 16))
+  }
+
+  drawBand(
+    lightBand, background: Palette.sheetLightBar, label: "light menu bar — tinted black",
+    labelColor: Palette.sheetLightInk, in: cg)
+  drawBand(
+    darkBand, background: Palette.sheetDarkBar, label: "dark menu bar — tinted white",
+    labelColor: Palette.ink, in: cg)
+  drawBand(
+    footer, background: Palette.sheetLightBar, label: "actual size (16 px / 32 px)",
+    labelColor: Palette.sheetLightInk, in: cg)
+
+  cg.saveGState()
+  cg.interpolationQuality = .none
+  for (index, candidate) in candidates.enumerated() {
+    let size = CGFloat(candidate.image.width) * magnification
+    cg.draw(
+      candidate.image,
+      in: CGRect(
+        x: columnCenters[index] - size / 2, y: lightBand.midY - size / 2, width: size, height: size)
+    )
+  }
+  for (index, candidate) in candidates.enumerated() {
+    let glyph = tinted(candidate.image, scale: magnification, tint: color(Palette.ink))
+    let size = CGFloat(glyph.width)
+    cg.draw(
+      glyph,
+      in: CGRect(
+        x: columnCenters[index] - size / 2, y: darkBand.midY - size / 2, width: size, height: size))
+  }
+  for (index, candidate) in candidates.enumerated() {
+    let size = CGFloat(candidate.image.width)
+    cg.draw(
+      candidate.image,
+      in: CGRect(
+        x: columnCenters[index] - size / 2, y: footer.midY - size / 2, width: size, height: size))
+  }
+  cg.restoreGState()
+}
+
+private func drawBand(
+  _ rect: CGRect, background: UInt32, label: String, labelColor: UInt32, in cg: CGContext
+) {
+  fill(
+    CGPath(roundedRect: rect, cornerWidth: 18, cornerHeight: 18, transform: nil),
+    color: color(background), in: cg)
+  drawText(
+    label, font: NSFont.systemFont(ofSize: 17, weight: .medium), color: color(labelColor),
+    at: CGPoint(x: rect.minX + 22, y: rect.maxY - 40))
 }
 
 // MARK: - README hero
@@ -577,19 +768,36 @@ private func verify() {
   if heroRep.pixelsWide != 1200 || heroRep.pixelsHigh != 400 {
     failures.append("hero.png: \(heroRep.pixelsWide)x\(heroRep.pixelsHigh), expected 1200x400")
   }
-  var shades = Set<UInt32>()
-  for y in stride(from: 0, to: heroRep.pixelsHigh, by: 4) {
-    for x in stride(from: 0, to: heroRep.pixelsWide, by: 4) {
-      guard let pixel = heroRep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
-      let brightness = pixel.redComponent + pixel.greenComponent + pixel.blueComponent
-      shades.insert(UInt32(brightness * 32))
-    }
+  if countsToneLevels(heroRep) < 8 {
+    failures.append("hero.png: looks blank (only \(countsToneLevels(heroRep)) tone levels)")
   }
-  if shades.count < 8 {
-    failures.append("hero.png: looks blank (only \(shades.count) tone levels)")
+
+  guard let comparisonRep = bitmap(at: comparisonURL) else {
+    failures.append("docs/assets/menubar-glyph-comparison.png: missing or unreadable")
+    return report(failures)
+  }
+  if comparisonRep.pixelsWide != 1200 || comparisonRep.pixelsHigh != 920 {
+    failures.append(
+      "menubar-glyph-comparison.png: \(comparisonRep.pixelsWide)x\(comparisonRep.pixelsHigh), expected 1200x920"
+    )
+  }
+  if countsToneLevels(comparisonRep) < 8 {
+    failures.append("menubar-glyph-comparison.png: looks blank")
   }
 
   report(failures)
+}
+
+/// Coarse brightness histogram — enough to tell a rendered sheet from a flat fill.
+private func countsToneLevels(_ rep: NSBitmapImageRep) -> Int {
+  var shades = Set<UInt32>()
+  for y in stride(from: 0, to: rep.pixelsHigh, by: 4) {
+    for x in stride(from: 0, to: rep.pixelsWide, by: 4) {
+      guard let pixel = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+      shades.insert(UInt32((pixel.redComponent + pixel.greenComponent + pixel.blueComponent) * 32))
+    }
+  }
+  return shades.count
 }
 
 private func report(_ failures: [String]) {
@@ -638,20 +846,26 @@ for entry in iconsetEntries {
 }
 
 write(
-  render(pixelsWide: 16, pixelsHigh: 16) { drawMenuBarGlyph($0, pixels: 16) }.pngData(),
+  render(pixelsWide: 16, pixelsHigh: 16) { drawMenuBarGauge($0, pixels: 16) }.pngData(),
   to: menuBarGlyphURL)
 write(
-  render(pixelsWide: 32, pixelsHigh: 32) { drawMenuBarGlyph($0, pixels: 32) }.pngData(),
+  render(pixelsWide: 32, pixelsHigh: 32) { drawMenuBarGauge($0, pixels: 32) }.pngData(),
   to: menuBarGlyph2xURL)
 write(
   render(pixelsWide: 1200, pixelsHigh: 400) { drawHero($0, pixelsWide: 1200, pixelsHigh: 400) }
     .pngData(),
   to: heroURL)
+write(
+  render(pixelsWide: 1200, pixelsHigh: 920) {
+    drawGlyphComparison($0, pixelsWide: 1200, pixelsHigh: 920)
+  }.pngData(),
+  to: comparisonURL)
 
 runIconutil(iconset: iconsetDirectory, output: icnsURL)
 verify()
 
 print("make-icon: \(iconsetEntries.count) iconset PNGs → dist/icon/AppIcon.iconset")
 print("make-icon: Resources/AppIcon.icns (iconutil)")
-print("make-icon: Resources/MenuBarIconTemplate.png 16x16 + @2x 32x32 (black + alpha)")
+print("make-icon: Resources/MenuBarIconTemplate.png 16x16 + @2x 32x32 (gauge, black + alpha)")
 print("make-icon: docs/assets/hero.png 1200x400")
+print("make-icon: docs/assets/menubar-glyph-comparison.png 1200x920")

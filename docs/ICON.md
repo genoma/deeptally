@@ -8,9 +8,10 @@ downloaded, and no third-party tool is used.
 |---|---|---|
 | `Scripts/make-icon.swift` | — | generator (AppKit + CoreGraphics only) |
 | `Resources/AppIcon.icns` | 1024² + all smaller reps | app icon, copied into `DeepTally.app/Contents/Resources/` by `Scripts/bundle.sh` |
-| `Resources/MenuBarIconTemplate.png` | 16×16 | status item glyph |
+| `Resources/MenuBarIconTemplate.png` | 16×16 | status item glyph (gauge ring + needle) |
 | `Resources/MenuBarIconTemplate@2x.png` | 32×32 | status item glyph (Retina) |
 | `docs/assets/hero.png` | 1200×400 | README hero |
+| `docs/assets/menubar-glyph-comparison.png` | 1200×920 | glyph-choice evidence strip (bars vs gauge) |
 
 `dist/icon/AppIcon.iconset/` (git-ignored) is the intermediate iconset; it is regenerated on every run.
 
@@ -65,9 +66,30 @@ change the other.
 
 ## Menu bar glyph
 
-Three descending tally bars, 2 px tall with 2 px gaps on a 16×16 grid, aligned to whole pixels so the
-16 px bitmap stays crisp (1 px corner radius = pill ends). Descending widths read as depth marks and
-survive at 16 px in a way a dial would not.
+The shipped status-item glyph is a **gauge**: a thin ring with a gap at the bottom, a needle at 60° and a
+pivot hub, drawn in a 16×16 design space (ring radius 5.6, stroke 1.5, 50° bottom gap, needle 3.7 long
+and 1.5 wide, hub ⌀2.4). It is the app icon's dial reduced to the fewest strokes that survive a 16 px
+bitmap, and the bottom gap keeps the family resemblance to the icon's own downward-opening arc.
+
+Why not the previous three descending tally bars? Next to Wi-Fi and battery, descending bars read as a
+signal/level indicator. The gauge removes that misread risk while staying "measurement".
+
+![bars vs gauge at 16 and 32 px, 8× magnified](assets/menubar-glyph-comparison.png)
+
+### Why the ring has to be thin
+
+At 16 px an arc + needle only reads if the ring is thin enough to leave the needle a gap. A bold ~2 px
+arc — the app icon's proportion — swallows needle, hub and ring into a single blob. 1.5 px stroke with a
+1.5 px needle and a ⌀2.4 px hub keeps four separate elements. Roughly forty variants were evaluated
+across six rounds (arc weights 1.1–2.0 px, sweeps 180°–360°, needle angles 45–90°, hub / no hub,
+tapered, wedge and notched-disc pointers) before settling on these numbers; Apple's own
+`gauge.with.needle` SF Symbol uses the same thin-ring + short-needle composition, which pointed at the
+answer. `docs/assets/menubar-glyph-comparison.png` shows the shipped gauge beside the retired bars at
+both sizes, 8× nearest-neighbour magnified on light and dark menu bars and at actual size, so the call
+stays inspectable; the bars renderer is still in the script for exactly that purpose.
+
+Residual trade-off: a thin ring with a hand can also read as a clock at 16 px. The 50° bottom gap and the
+60° needle keep it in "meter" territory, and unlike the bars it does not claim signal strength.
 
 Both files are **pure black + alpha**: the generator verifies every pixel is `R = G = B = 0` and exits
 non-zero otherwise. macOS tints a template image, so the glyph draws black on a light menu bar and
@@ -89,8 +111,8 @@ swift Scripts/make-icon.swift
 
 The script writes every artefact and then verifies its own output: the ten iconset PNGs exist at
 the right pixel sizes, both template PNGs are 16/32 px and pure black + alpha, the `.icns` starts with
-the `icns` magic, and the hero is 1200×400 and not blank. Any mismatch exits non-zero. It runs
-`/usr/bin/iconutil -c icns` itself.
+the `icns` magic, the hero is 1200×400 and not blank, and the comparison sheet is 1200×920 and not
+blank. Any mismatch exits non-zero. It runs `/usr/bin/iconutil -c icns` itself.
 
 Manual spot checks:
 
@@ -99,6 +121,7 @@ file Resources/AppIcon.icns
 sips -g pixelWidth -g pixelHeight Resources/AppIcon.icns
 sips -g pixelWidth -g pixelHeight -g hasAlpha Resources/MenuBarIconTemplate.png Resources/MenuBarIconTemplate@2x.png
 iconutil -c iconset Resources/AppIcon.icns -o /tmp/AppIcon.iconset   # round-trip
+open docs/assets/menubar-glyph-comparison.png                        # glyph-choice review sheet
 ```
 
 Output is byte-identical across runs: no randomness, no timers, no network, no dates, and the same
