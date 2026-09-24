@@ -65,7 +65,10 @@ off-peak at exactly half. Model line-up/prices changed three times in 2026 → `
 
 **Local usage source**
 - `~/.local/share/opencode/opencode.db` (SQLite): `message.data` JSON has `tokens.input/output/reasoning/cache.read/cache.write`
-  plus `cost`, `modelID`, `providerID`; `session` denormalises per-model totals. Cache reads verified non-zero locally.
+  plus `cost`, `modelID`, `providerID`; `session` denormalises per-model totals (do not trust those — they ignored cache-read pricing).
+  Cache reads verified non-zero locally. **Both schema generations are live and hold largely distinct rows** — the importer
+  unions `message` + `session_message` (2590 rows only in `message`, 1062 only in `session_message`; 0 divergent counters
+  across the 1638 overlapping token-bearing rows).
 - The DB also stores credentials **in plaintext** in a credential table → read `message` only, never that table.
 - Two schema generations exist (`message`+`part`, `session_message`) → feature-detect.
 
@@ -132,11 +135,14 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [x] `DeepTallyApp` shell: `NSStatusItem` + `NSPopover` + SwiftUI popover; `LSUIElement`; ad-hoc bundle builds
 - [x] `deeptally` CLI: `--version`, `balance` (real balance verified 2026-09-24), `usage` stub
 - [x] `Scripts/bundle.sh` — hand-assembled `DeepTally.app`, ad-hoc signed, `codesign --verify` clean
-- [ ] `PriceTable` loader, `PeakOffPeak`, `CostEngine` + holiday calendar *(lane PRICING)*
-- [ ] usage/SSE parsing + error mapping *(lane API)*
-- [ ] opencode importer *(lane OPENCODE)*
-- [ ] `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar glyph, README hero *(lane ICON)*
-- [ ] `docs/` set: INSTALL, UNSIGNED, PRIVACY, ARCHITECTURE, DEVELOPMENT, RELEASING + SECURITY/CONTRIBUTING *(lane DOCS)*
+- [x] `PriceTable` loader, `PeakOffPeak`, `CostEngine` + holiday calendar *(lane PRICING — 32 tests; independently cross-checked against a Python reference over 2268 comparisons, 0 mismatches)*
+- [x] usage/SSE parsing + error mapping *(lane API — 21 tests)*
+- [x] opencode importer *(lane OPENCODE — 14 tests, read-only, credential-table DENY authorizer, union of both generations)*
+- [x] `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar glyph, README hero *(lane ICON — deterministic generator, 10 iconset sizes, template glyph)*
+- [x] `docs/` set: INSTALL, UNSIGNED, PRIVACY, ARCHITECTURE, DEVELOPMENT, RELEASING + SECURITY/CONTRIBUTING *(lane DOCS — 63 links verified, commands checked against the Makefile)*
+- [ ] Wire the pricing engine + opencode importer into the ledger and CLI (`LedgerStore`, `deeptally usage`) — Step 4
+- [ ] Holiday calendar still ships empty: fill the official 2026 CN State Council dates (needs a web lookup)
+- [ ] Decide the API lane's `DeepSeekAPIError` vs `DeepSeekClient.APIError` duplication at wiring time
   **Gate:** `make build && make test && make bundle` pass with CLT only ✅ 2026-09-24 · `deeptally balance` prints a real balance ✅ · status item visible ⏳ needs a human look.
   **Lanes:** ICON, PRICING, API, OPENCODE, DOCS (see §6) — parent owns Package.swift/Makefile/UI/scripts.
 
@@ -234,3 +240,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | — | Decisions resolved: balance metric, $2 threshold, tap yes, CNY as-is, rate-now indicator added; CLI renamed `dtally` → `deeptally` |
 | 2026-09-24 | 1 | Skeleton builds: `DeepTallyCore` + `DeepTallyApp` + `deeptally`, 5 tests green, ad-hoc bundle verified, live balance via CLI |
 | 2026-09-24 | 1 | Traps fixed + documented: APFS case-insensitivity merged `DeepTally`/`deeptally` paths; CLT needs `-plugin-path .../plugins/testing` for swift-testing macros |
+| 2026-09-24 | 1 | Five lanes merged (icon, pricing, api, opencode, docs): 41 files, 72 tests in 14 suites, lint clean, bundle signed |
+| 2026-09-24 | 1 | opencode importer evidence: both schema generations live with disjoint rows (2590 / 1062 / 1638 overlap); union rule adopted, 0 divergent counters |

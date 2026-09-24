@@ -146,7 +146,14 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 5. Quarantine is the Gatekeeper gate: browser downloads are blocked, `curl` downloads are not.
 6. App Translocation: launching a quarantined app from outside `/Applications` runs it from a random
    read-only path and breaks login items/Keychain. Always move it first; detect and warn in-app.
-7. opencode has **two schema generations** (`message`+`part` and `session_message`) — feature-detect.
+7. opencode has **two live schema generations** (`message` and `session_message`) holding largely *disjoint* usage rows
+   (verified on a real DB: 2590 rows only in `message`, 1062 only in `session_message`, 1638 in both). The importer must
+   **union both**, dedupe on `rawHash = (source, id, session_id)`, and let `message` win overlaps — 0 divergent counters
+   across the 1638 overlapping token-bearing rows, with a `time_updated` tie-break if that ever changes.
+   Token mapping: prompt = input + cache.read + cache.write · cacheHit = cache.read · cacheMiss = input + cache.write ·
+   completion = output + reasoning (opencode keeps reasoning *outside* output, and DeepSeek bills reasoning as output —
+   never add reasoning again downstream or output is double-counted).
+   The importer also installs a SQLite authorizer that DENYs reads on `credential*`/`cred_*`/`account*`/`auth*`.
 8. macOS 27 hides menu-item symbol images by default in `NSMenu`; use `labelStyle(.titleOnly)` / set
    `preferredImageVisibility` explicitly.
 9. Peak/off-peak *classification* is computed in UTC against `Resources/ChinaHolidays.json`, but always
