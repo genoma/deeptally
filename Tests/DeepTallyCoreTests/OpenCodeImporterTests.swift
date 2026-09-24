@@ -702,3 +702,135 @@ struct OpenCodeImporterSafetyTests {
     #expect(!OpenCodeImporter.isSensitiveTableName("session_message"))
   }
 }
+
+// MARK: - Incremental scans
+
+/// Two assistant rows, one second apart, with different token counts.
+private func insertTwoTokenRows(into fixture: FixtureDatabase) throws -> (older: Date, newer: Date)
+{
+  let older: Int64 = 1_787_800_000_000
+  let newer: Int64 = 1_787_800_500_000
+  try fixture.insert(
+    row(
+      id: "msg_old",
+      sessionID: "ses_old",
+      created: older,
+      data: generationAMessage(
+        modelID: "deepseek-flash", createdMilliseconds: older,
+        tokens: TokenSpec(input: 100, cacheRead: 700))),
+    into: "message")
+  try fixture.insert(
+    row(
+      id: "msg_new",
+      sessionID: "ses_new",
+      created: newer,
+      data: generationAMessage(
+        modelID: "deepseek-flash", createdMilliseconds: newer,
+        tokens: TokenSpec(input: 50, cacheRead: 20))),
+    into: "message")
+  return (
+    Date(timeIntervalSince1970: TimeInterval(older) / 1_000),
+    Date(timeIntervalSince1970: TimeInterval(newer) / 1_000)
+  )
+}
+
+/// Deletes one ledger row through a second connection, standing in for a prune or a hand-cleaned file.
+private func deleteLedgerRow(rawHash: String, at url: URL) throws {
+  var handle: OpaquePointer?
+  let open = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE, nil)
+  guard open == SQLITE_OK, let database = handle else {
+    if let handle { _ = sqlite3_close(handle) }
+    throw FixtureDatabase.FixtureError(description: "could not open the ledger (code \(open))")
+  }
+  defer { _ = sqlite3_close(database) }
+
+  var statement: OpaquePointer?
+  let prepare = sqlite3_prepare_v2(
+    database, "DELETE FROM request WHERE raw_hash = ?1", -1, &statement, nil)
+  guard prepare == SQLITE_OK, let prepared = statement else {
+    throw FixtureDatabase.FixtureError(description: "could not prepare the delete")
+  }
+  defer { _ = sqlite3_finalize(prepared) }
+  _ = sqlite3_bind_text(
+    prepared, 1, rawHash, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+  guard sqlite3_step(prepared) == SQLITE_DONE else {
+    throw FixtureDatabase.FixtureError(description: "the delete failed")
+  }
+}
+
+private func makeTemporaryLedger() throws -> (store: LedgerStore, directory: URL) {
+  let directory = FileManager.default.temporaryDirectory
+    .appending(path: "deeptally-ledger-import-\(UUID().uuidString)")
+  return (try LedgerStore(url: directory.appending(path: "ledger.sqlite")), directory)
+}
+
+@Suite("OpenCode importer incremental scan")
+struct OpenCodeImporterIncrementalTests {
+  @Test("a scan from the newest instant seen finds nothing new")
+  func sinceAtLatestSeenFindsNothing() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createMessageTable()
+    _ = try insertTwoTokenRows(into: fixture)
+
+    let importer = importer(for: fixture)
+    let full = try importer.importAll(since: nil)
+    #expect(full.records.count == 2)
+    let newest = try #require(full.latestSeen)
+    #expect(newest == Date(timeIntervalSince1970: 1_787_800_500))
+
+    let incremental = try importer.importAll(since: newest)
+    #expect(incremental.records.isEmpty)
+    #expect(incremental.latestSeen == nil)
+
+    // A watermark just before the newest row pulls in exactly that row, and nothing older.
+    let widened = try importer.importAll(since: newest.addingTimeInterval(-0.001))
+    #expect(widened.records.map(\.record.sessionID) == ["ses_new"])
+    #expect(widened.latestSeen == newest)
+
+    // The full scan still sees both, so widening a watermark can always repair a scan.
+    #expect(try importer.importAll().count == 2)
+    #expect(try importer.importAll(since: nil).latestSeen == newest)
+  }
+
+  @Test("a row deleted from the ledger is re-inserted by the next full scan, and only that row")
+  func deletedRowIsReinserted() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createMessageTable()
+    _ = try insertTwoTokenRows(into: fixture)
+
+    let ledger = try makeTemporaryLedger()
+    defer { try? FileManager.default.removeItem(at: ledger.directory) }
+    let store = ledger.store
+
+    let first = try importer(for: fixture).importAll(since: nil)
+    #expect(try store.insert(first.records.map { (record: $0.record, rawHash: $0.rawHash) }) == 2)
+    let before = try store.summary(since: .distantPast, until: .distantFuture)
+    #expect(before.requestCount == 2)
+
+    // The ledger, not the importer, remembers where the import got to.
+    let newest = try #require(first.latestSeen)
+    try store.recordImportWatermark(newest, for: .opencode)
+    let watermark = try #require(try store.importWatermark(for: .opencode))
+
+    // The next tick re-reads nothing and stores nothing.
+    let incremental = try importer(for: fixture).importAll(since: watermark)
+    #expect(incremental.records.isEmpty)
+    #expect(
+      try store.insert(incremental.records.map { (record: $0.record, rawHash: $0.rawHash) }) == 0)
+    #expect(try store.summary(since: .distantPast, until: .distantFuture) == before)
+
+    // A row goes missing — a prune, or a ledger someone cleaned by hand.
+    let missing = try #require(first.records.first)
+    try deleteLedgerRow(rawHash: missing.rawHash, at: store.url)
+    #expect(try store.summary(since: .distantPast, until: .distantFuture).requestCount == 1)
+
+    // A full scan offers both rows again; `raw_hash` uniqueness stores only the missing one, so the
+    // summary comes back identical instead of counting the surviving row twice.
+    let rescan = try importer(for: fixture).importAll()
+    #expect(rescan.count == 2)
+    #expect(try store.insert(rescan.map { (record: $0.record, rawHash: $0.rawHash) }) == 1)
+    #expect(try store.summary(since: .distantPast, until: .distantFuture) == before)
+  }
+}

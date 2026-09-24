@@ -29,6 +29,19 @@ public struct OpenCodeImporter {
     }
   }
 
+  /// The outcome of one scan: the rows a caller has not been offered before, and the watermark to
+  /// hand back on the next one.
+  public struct ImportResult: Sendable, Equatable {
+    public let records: [ImportedRecord]
+    /// The newest record instant in ``records``, or `nil` when the scan found nothing new.
+    public let latestSeen: Date?
+
+    public init(records: [ImportedRecord], latestSeen: Date?) {
+      self.records = records
+      self.latestSeen = latestSeen
+    }
+  }
+
   public enum ImportError: Error, Equatable, Sendable {
     case databaseMissing(path: String)
     case databaseUnusable(reason: String)
@@ -53,7 +66,33 @@ public struct OpenCodeImporter {
 
   /// Every assistant message that carries usage, from whichever generation stores it. Rows that do not
   /// decode or that have no counters are skipped, never fatal: one bad row must not block the ledger.
+  ///
+  /// This is the full scan, and it is the right call for the first import of a profile or for a
+  /// repair pass. For the fifteen-minute tick use ``importAll(since:)``.
   public func importAll() throws -> [ImportedRecord] {
+    try scan(since: nil)
+  }
+
+  /// Every row newer than `since`, plus the newest instant seen, so the caller can resume from there.
+  ///
+  /// The watermark is what makes a 400 MB database cheap to re-read every fifteen minutes: rows at or
+  /// before `since` are filtered out by SQL (on opencode's millisecond `time_created`/`time_updated`
+  /// columns) and again in memory against the record's own timestamp, so the result is exactly the
+  /// rows a caller has not been offered before. `since == nil` scans everything.
+  ///
+  /// Passing a watermark *earlier* than the previous one is always safe — the ledger ignores rows it
+  /// already has, keyed on `rawHash` — and is the way to recover a row that arrived with a timestamp
+  /// at or before the old watermark, the one case a strict `>` cannot see. `latestSeen` is `nil` when
+  /// the scan saw nothing; a caller keeps its previous watermark in that case.
+  ///
+  /// The importer stores nothing: the ledger owns the watermark, because the ledger is what knows
+  /// which rows were actually committed.
+  public func importAll(since: Date?) throws -> ImportResult {
+    let records = try scan(since: since)
+    return ImportResult(records: records, latestSeen: records.map(\.record.timestamp).max())
+  }
+
+  private func scan(since: Date?) throws -> [ImportedRecord] {
     guard FileManager.default.fileExists(atPath: databaseURL.path) else {
       throw ImportError.databaseMissing(path: databaseURL.path)
     }
@@ -63,15 +102,24 @@ public struct OpenCodeImporter {
 
     try execute(database, sql: "PRAGMA busy_timeout = 2000")
 
+    // Only used to narrow the read; the authoritative cutoff is `record.timestamp > since` below.
+    let sinceMilliseconds = since.map { Int64(($0.timeIntervalSince1970 * 1_000).rounded(.down)) }
     let schema = try detectSchema(in: database)
     var candidates: [Candidate] = []
     if schema.hasMessage {
-      candidates.append(contentsOf: try readCandidates(database, generation: .message))
+      candidates.append(
+        contentsOf: try readCandidates(
+          database, generation: .message, sinceMilliseconds: sinceMilliseconds))
     }
     if schema.hasSessionMessage {
-      candidates.append(contentsOf: try readCandidates(database, generation: .sessionMessage))
+      candidates.append(
+        contentsOf: try readCandidates(
+          database, generation: .sessionMessage, sinceMilliseconds: sinceMilliseconds))
     }
-    return merge(candidates)
+
+    let merged = merge(candidates)
+    guard let since else { return merged }
+    return merged.filter { $0.record.timestamp > since }
   }
 
   // MARK: - Connection
@@ -195,12 +243,21 @@ public struct OpenCodeImporter {
     case message
     case sessionMessage
 
-    var sql: String {
+    /// With a watermark, the pre-filter keeps rows whose `time_created` **or** `time_updated` is at
+    /// or after the cutoff, so a row written since the last scan — or one opencode has touched since
+    /// — is always reconsidered. The timestamps inside `data` stay authoritative (`makeCandidate`
+    /// prefers them whenever they are present), so this only narrows the read: the decision is the
+    /// in-memory `record.timestamp > since`. Both extra branches exist to avoid JSON-decoding a
+    /// 400 MB history every fifteen minutes, not to change which rows are imported.
+    func sql(sinceMilliseconds: Int64?) -> String {
+      let filter =
+        sinceMilliseconds == nil ? "" : " WHERE time_created >= ?1 OR time_updated >= ?1"
       switch self {
       case .message:
-        return "SELECT id, session_id, time_created, time_updated, data FROM message"
+        return "SELECT id, session_id, time_created, time_updated, data FROM message" + filter
       case .sessionMessage:
         return "SELECT id, session_id, time_created, time_updated, data, type FROM session_message"
+          + filter
       }
     }
   }
@@ -215,14 +272,19 @@ public struct OpenCodeImporter {
 
   private func readCandidates(
     _ database: OpaquePointer,
-    generation: Generation
+    generation: Generation,
+    sinceMilliseconds: Int64?
   ) throws -> [Candidate] {
     var statement: OpaquePointer?
-    let prepare = sqlite3_prepare_v2(database, generation.sql, -1, &statement, nil)
+    let prepare = sqlite3_prepare_v2(
+      database, generation.sql(sinceMilliseconds: sinceMilliseconds), -1, &statement, nil)
     guard prepare == SQLITE_OK, let prepared = statement else {
       throw Self.sqliteError(prepare, message: Self.errorMessage(database), context: "prepare read")
     }
     defer { _ = sqlite3_finalize(prepared) }
+    if let sinceMilliseconds {
+      sqlite3_bind_int64(prepared, 1, sinceMilliseconds)
+    }
 
     var candidates: [Candidate] = []
     while true {
