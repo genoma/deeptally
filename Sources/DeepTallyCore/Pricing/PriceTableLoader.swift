@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
+/// One of the three USD-per-million amounts a model row carries. Named exactly as the JSON key it
+/// comes from, so a rejected table points at the line a person has to edit.
+public enum PriceField: String, Sendable, Equatable {
+  case cacheHit = "cache_hit_usd_per_million"
+  case cacheMiss = "cache_miss_usd_per_million"
+  case output = "output_usd_per_million"
+}
+
 /// Typed failures from the shipped pricing data. Everything a packaging bug or a hand-edited user
 /// file can break is a case here, so no pricing path has to trap.
 public enum PricingDataError: Swift.Error, Equatable, Sendable {
@@ -12,6 +20,10 @@ public enum PricingDataError: Swift.Error, Equatable, Sendable {
   case noModels
   /// `off_peak_multiplier` must be in `(0, 1]`.
   case invalidOffPeakMultiplier(Decimal)
+  /// A price must be strictly positive. A zero or negative amount would bill every request that
+  /// resolves to the model at nothing while the row still counts as priced, and a reprice would
+  /// then write those zeros over previously good costs. `field` names the JSON key, `model` the row.
+  case invalidPrice(model: String, field: PriceField, value: Decimal)
   /// A peak window must satisfy `0 <= start < end <= 24`.
   case invalidPeakWindow(startHourUTC: Int, endHourUTC: Int)
   /// The same alias is listed twice, so which row it resolves to would depend on table order.
@@ -132,6 +144,13 @@ public struct PriceTableLoader: Sendable {
     guard table.offPeakMultiplier > 0, table.offPeakMultiplier <= 1 else {
       throw PricingDataError.invalidOffPeakMultiplier(table.offPeakMultiplier)
     }
+    // A resolving model counts as priced, so a zero or negative amount here is what makes a typo
+    // bill nothing: reject the table and name the row rather than price requests at zero.
+    for price in table.models {
+      try requirePositive(price.cacheHitUSDPerMillion, .cacheHit, in: price.model)
+      try requirePositive(price.cacheMissUSDPerMillion, .cacheMiss, in: price.model)
+      try requirePositive(price.outputUSDPerMillion, .output, in: price.model)
+    }
     for window in table.peakWindowsUTC {
       guard window.startHourUTC >= 0, window.startHourUTC < window.endHourUTC,
         window.endHourUTC <= 24
@@ -147,6 +166,16 @@ public struct PriceTableLoader: Sendable {
       for alias in price.aliases where !claimedAliases.insert(alias).inserted {
         throw PricingDataError.duplicateAlias(alias: alias)
       }
+    }
+  }
+
+  /// The magnitude rule for one amount, so the three fields of a row are checked the same way and
+  /// a rejection names both the model and the JSON key to fix.
+  private static func requirePositive(
+    _ amount: Decimal, _ field: PriceField, in model: String
+  ) throws {
+    guard amount > 0 else {
+      throw PricingDataError.invalidPrice(model: model, field: field, value: amount)
     }
   }
 }

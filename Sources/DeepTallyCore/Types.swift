@@ -64,9 +64,46 @@ public struct BalanceInfo: Sendable, Equatable, Codable {
 
 extension Decimal {
   /// Every monetary value in this project is a JSON **string** — DeepSeek returns amounts as strings
-  /// and `PriceTable.json` follows the same convention to avoid float drift. Parse them here, once.
+  /// and `PriceTable.json` follows the same convention to avoid float drift.
+  ///
+  /// This is the tolerant reading, for amounts that arrive from the API: an amount the remote service
+  /// spells oddly must not stop the balance from being shown, so an unreadable string becomes zero.
+  /// A price-table amount is data a person edits and is read with ``parseStrict(_:)`` instead.
   static func parse(_ raw: String) -> Decimal {
     Decimal(string: raw, locale: Locale(identifier: "en_US_POSIX")) ?? .zero
+  }
+
+  /// One plain decimal numeral, or `nil`. The whole trimmed string must be the number: on its own,
+  /// `Decimal(string:)` stops at the first character it cannot use, so `"0.30 USD"` reads as 0.3,
+  /// `"0,30"` and `"0x10"` as 0 and `"1_000"` as 1. A price that silently becomes zero bills the
+  /// model at nothing while it still counts as priced, so a table containing one is rejected whole.
+  static func parseStrict(_ raw: String) -> Decimal? {
+    let text = raw.trimmingCharacters(in: .whitespaces)
+    guard isDecimalNumeral(text) else { return nil }
+    return Decimal(string: text, locale: Locale(identifier: "en_US_POSIX"))
+  }
+
+  /// An optional sign, at least one digit and at most one `.` — every shape a hand-written price
+  /// needs, and nothing else. The digits are ASCII so a numeral cannot smuggle in another script.
+  private static func isDecimalNumeral(_ text: String) -> Bool {
+    var index = text.startIndex
+    if index < text.endIndex, text[index] == "+" || text[index] == "-" {
+      index = text.index(after: index)
+    }
+    var digitCount = 0
+    var hasPoint = false
+    while index < text.endIndex {
+      switch text[index] {
+      case "0"..."9":
+        digitCount += 1
+      case "." where !hasPoint:
+        hasPoint = true
+      default:
+        return false
+      }
+      index = text.index(after: index)
+    }
+    return digitCount > 0
   }
 }
 
@@ -251,6 +288,23 @@ public struct RateSnapshot: Sendable, Equatable {
   }
 }
 
+/// Decodes one amount of the price table. Unlike ``Decimal/parse(_:)``, a value that is not a
+/// decimal numeral fails the decode: the price table is data a person edits, and a price that
+/// decoded to zero would bill the model at nothing while it still counts as priced. `owner` is the
+/// model the amount belongs to, so the error names the row to fix; the table's multiplier has none.
+private func decodeAmount<Key: CodingKey>(
+  _ container: KeyedDecodingContainer<Key>, forKey key: Key, owner: String? = nil
+) throws -> Decimal {
+  let raw = try container.decode(String.self, forKey: key)
+  guard let amount = Decimal.parseStrict(raw) else {
+    let subject = owner.map { " for \($0)" } ?? ""
+    throw DecodingError.dataCorruptedError(
+      forKey: key, in: container,
+      debugDescription: "\(key.stringValue) \"\(raw)\"\(subject) is not a decimal amount")
+  }
+  return amount
+}
+
 /// Peak prices in USD per 1M tokens. Off-peak is derived via `PriceTable.offPeakMultiplier`.
 public struct ModelPrice: Sendable, Equatable, Codable {
   public let model: String
@@ -287,12 +341,11 @@ public struct ModelPrice: Sendable, Equatable, Codable {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     model = try container.decode(String.self, forKey: .model)
     aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
-    cacheHitUSDPerMillion = Decimal.parse(
-      try container.decode(String.self, forKey: .cacheHitUSDPerMillion))
-    cacheMissUSDPerMillion = Decimal.parse(
-      try container.decode(String.self, forKey: .cacheMissUSDPerMillion))
-    outputUSDPerMillion = Decimal.parse(
-      try container.decode(String.self, forKey: .outputUSDPerMillion))
+    cacheHitUSDPerMillion = try decodeAmount(
+      container, forKey: .cacheHitUSDPerMillion, owner: model)
+    cacheMissUSDPerMillion = try decodeAmount(
+      container, forKey: .cacheMissUSDPerMillion, owner: model)
+    outputUSDPerMillion = try decodeAmount(container, forKey: .outputUSDPerMillion, owner: model)
   }
 
   public func encode(to encoder: any Encoder) throws {
@@ -370,7 +423,7 @@ public struct PriceTable: Sendable, Equatable, Codable {
     version = try container.decode(String.self, forKey: .version)
     currency = try container.decode(String.self, forKey: .currency)
     effectiveFrom = try container.decode(String.self, forKey: .effectiveFrom)
-    offPeakMultiplier = Decimal.parse(try container.decode(String.self, forKey: .offPeakMultiplier))
+    offPeakMultiplier = try decodeAmount(container, forKey: .offPeakMultiplier)
     peakWindowsUTC = try container.decode([PeakWindow].self, forKey: .peakWindowsUTC)
     holidays = try container.decodeIfPresent([String].self, forKey: .holidays) ?? []
     models = try container.decodeIfPresent([ModelPrice].self, forKey: .models) ?? []

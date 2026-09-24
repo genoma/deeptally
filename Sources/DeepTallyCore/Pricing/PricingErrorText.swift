@@ -34,6 +34,9 @@ extension PricingDataError {
     case .invalidOffPeakMultiplier(let value):
       let clause = "the off-peak multiplier \(value) is not in (0, 1]"
       return ("\(clause).", clause)
+    case .invalidPrice(let model, let field, let value):
+      let clause = "the \(field.rawValue) \(value) for \(model) is not greater than zero"
+      return ("\(clause).", clause)
     case .invalidPeakWindow(let start, let end):
       let clause = "the peak window \(start)-\(end) UTC is not a valid hour range"
       return ("\(clause).", clause)
@@ -53,6 +56,10 @@ extension PricingDataError {
       if let end = text.firstIndex(where: { $0 == "," || $0 == "}" }) {
         text = String(text[..<end])
       }
+    } else if let clause = text.range(of: "Debug description: ") {
+      // The `String(describing:)` form of a `DecodingError`. Everything before this marker is the
+      // coding path; after it is the clause that names the field and the value to fix.
+      text = String(text[clause.upperBound...])
     }
     text = text.trimmingCharacters(in: .whitespacesAndNewlines)
     if text.isEmpty {

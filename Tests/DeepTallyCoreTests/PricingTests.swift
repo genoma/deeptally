@@ -50,6 +50,35 @@ private func fixtureTable(
   )
 }
 
+/// One row as raw JSON, so a price string can be spelled exactly as a user might type it. The point
+/// of the strictness tests below is that `"TBD"`, `""` and `"0,30"` are strings, not numbers.
+private func fixtureJSON(
+  cacheHit: String = "0.006",
+  cacheMiss: String = "0.30",
+  output: String = "1.20",
+  offPeakMultiplier: String = "0.5"
+) -> String {
+  """
+  {
+    "version": "fixture",
+    "currency": "USD",
+    "effective_from": "2026-09-24",
+    "off_peak_multiplier": "\(offPeakMultiplier)",
+    "peak_windows_utc": [{ "start_hour_utc": 1, "end_hour_utc": 4 }],
+    "holidays": [],
+    "models": [
+      {
+        "model": "deepseek-flash",
+        "aliases": ["deepseek-v4-flash"],
+        "cache_hit_usd_per_million": "\(cacheHit)",
+        "cache_miss_usd_per_million": "\(cacheMiss)",
+        "output_usd_per_million": "\(output)"
+      }
+    ]
+  }
+  """
+}
+
 /// A class in this test bundle, which carries no resources: `Bundle(for:)` on it is how the
 /// "shipped table is missing" path is exercised without touching the real package.
 private final class TestBundleAnchor: NSObject {}
@@ -122,6 +151,89 @@ struct PriceTableLoaderTests {
       #expect(throws: PricingDataError.invalidOffPeakMultiplier(Decimal.parse(raw))) {
         try PriceTableLoader.validate(broken)
       }
+    }
+  }
+
+  /// The finding this covers: a price decoded through the tolerant balance parser became zero, the
+  /// row still resolved, and nothing reported the model as unpriced.
+  @Test("junk in a price field fails the decode instead of becoming zero")
+  func rejectsUnparsablePrices() throws {
+    for raw in ["0.30 USD", "", "TBD", "0,30"] {
+      let error = #expect(throws: PricingDataError.self) {
+        try PriceTableLoader.decode(Data(fixtureJSON(cacheMiss: raw).utf8), name: "fixture-inline")
+      }
+      let sentence = try #require(error?.userFacingSentence, "\"\(raw)\" must be rejected")
+      #expect(sentence.contains("cache_miss_usd_per_million"), "\"\(raw)\" must name the field")
+      #expect(sentence.contains("deepseek-flash"), "\"\(raw)\" must name the model")
+    }
+  }
+
+  @Test("every price field is read strictly, not just the cache-miss one")
+  func rejectsUnparsableAmountInEveryField() throws {
+    for (field, json) in [
+      (PriceField.cacheHit, fixtureJSON(cacheHit: "TBD")),
+      (.cacheMiss, fixtureJSON(cacheMiss: "TBD")),
+      (.output, fixtureJSON(output: "TBD")),
+    ] {
+      let error = #expect(throws: PricingDataError.self) {
+        try PriceTableLoader.decode(Data(json.utf8), name: "fixture-inline")
+      }
+      let sentence = try #require(error?.userFacingSentence)
+      #expect(sentence.contains(field.rawValue))
+      #expect(sentence.contains("deepseek-flash"))
+    }
+  }
+
+  @Test("an unparsable off-peak multiplier fails the decode too")
+  func rejectsUnparsableMultiplier() {
+    for raw in ["", "TBD", "0,5", "0.5 USD"] {
+      #expect(throws: PricingDataError.self) {
+        try PriceTableLoader.decode(
+          Data(fixtureJSON(offPeakMultiplier: raw).utf8), name: "fixture-inline")
+      }
+    }
+  }
+
+  @Test("a zero or negative price is rejected with the model and the field named")
+  func rejectsNonPositivePrices() throws {
+    let cases: [(field: PriceField, value: Decimal, json: String)] = [
+      (.cacheHit, Decimal.parse("0"), fixtureJSON(cacheHit: "0")),
+      (.cacheMiss, Decimal.parse("-1"), fixtureJSON(cacheMiss: "-1")),
+      (.output, Decimal.parse("0"), fixtureJSON(output: "0")),
+    ]
+
+    for entry in cases {
+      let error = #expect(
+        throws: PricingDataError.invalidPrice(
+          model: "deepseek-flash", field: entry.field, value: entry.value)
+      ) {
+        try PriceTableLoader.decode(Data(entry.json.utf8), name: "fixture-inline")
+      }
+      let sentence = try #require(error?.userFacingSentence)
+      #expect(sentence.contains(entry.field.rawValue))
+      #expect(sentence.contains("deepseek-flash"))
+    }
+  }
+
+  @Test("a valid table still decodes through the strict price reader")
+  func validTableStillDecodes() throws {
+    let table = try PriceTableLoader.decode(Data(fixtureJSON().utf8), name: "fixture-inline")
+    let flash = try #require(table.price(forModel: "deepseek-flash"))
+
+    #expect(flash.cacheHitUSDPerMillion == Decimal.parse("0.006"))
+    #expect(flash.cacheMissUSDPerMillion == Decimal.parse("0.30"))
+    #expect(flash.outputUSDPerMillion == Decimal.parse("1.20"))
+    #expect(table.offPeakMultiplier == Decimal.parse("0.5"))
+  }
+
+  @Test("every price in the shipped table is strictly positive")
+  func shippedTablePricesArePositive() throws {
+    let table = try PriceTableLoader().loadBundled()
+
+    for price in table.models {
+      #expect(price.cacheHitUSDPerMillion > 0, "\(price.model) cache hit")
+      #expect(price.cacheMissUSDPerMillion > 0, "\(price.model) cache miss")
+      #expect(price.outputUSDPerMillion > 0, "\(price.model) output")
     }
   }
 
@@ -311,6 +423,11 @@ struct PricingErrorTextTests {
       "the off-peak multiplier 1.5 is not in (0, 1]"
     ),
     (
+      .invalidPrice(model: "deepseek-flash", field: .cacheMiss, value: Decimal.parse("0")),
+      "the cache_miss_usd_per_million 0 for deepseek-flash is not greater than zero.",
+      "the cache_miss_usd_per_million 0 for deepseek-flash is not greater than zero"
+    ),
+    (
       .invalidPeakWindow(startHourUTC: 5, endHourUTC: 4),
       "the peak window 5-4 UTC is not a valid hour range.",
       "the peak window 5-4 UTC is not a valid hour range"
@@ -348,11 +465,11 @@ struct PricingErrorTextTests {
       // new case makes this file fail to build until its sentence is asserted above.
       switch error {
       case .resourceMissing, .decodeFailed, .noModels, .invalidOffPeakMultiplier,
-        .invalidPeakWindow, .duplicateAlias:
+        .invalidPrice, .invalidPeakWindow, .duplicateAlias:
         break
       }
     }
-    #expect(Self.wordings.count == 6)
+    #expect(Self.wordings.count == 7)
   }
 }
 
@@ -380,6 +497,43 @@ struct OverrideProblemTests {
     )
     // And the clause inside it is the one definition's, not a second copy of the wording.
     #expect(sentence.contains(PricingDataError.noModels.overrideProblemReason))
+  }
+
+  /// The finding's actual scenario: a typo in the documented, user-editable override. It must be
+  /// ignored — never billed as zero — and the sentence must name the model, or the user cannot tell
+  /// which row to fix.
+  @Test("an override with a zero price is ignored, names the model, and keeps the bundled table")
+  func zeroPriceOverrideFallsBack() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(homeDirectory: home)
+    try writeOverride(fixtureJSON(cacheMiss: "0"), in: home)
+
+    let (table, problem) = try loader.loadWithDiagnostics()
+
+    #expect(table.version == "2026-09-24")
+    let sentence = try #require(problem)
+    #expect(sentence.contains(loader.overrideURL.path(percentEncoded: false)))
+    #expect(sentence.contains("deepseek-flash"))
+    #expect(sentence.contains("cache_miss_usd_per_million"))
+    #expect(sentence.contains("not greater than zero"))
+  }
+
+  @Test("an override with an unparsable amount is ignored and names the model")
+  func unparsablePriceOverrideFallsBack() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(homeDirectory: home)
+    try writeOverride(fixtureJSON(cacheMiss: "TBD"), in: home)
+
+    let (table, problem) = try loader.loadWithDiagnostics()
+
+    #expect(table.version == "2026-09-24")
+    let sentence = try #require(problem)
+    #expect(sentence.contains(loader.overrideURL.path(percentEncoded: false)))
+    #expect(sentence.contains("deepseek-flash"))
+    #expect(sentence.contains("cache_miss_usd_per_million"))
+    #expect(sentence.contains("not a decimal amount"))
   }
 }
 
