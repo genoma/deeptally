@@ -160,19 +160,27 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Gate:** findings recorded in `docs/SPIKES.md` with observed output; fallbacks chosen for S3/S4 if they fail.
 
 ### Step 3 — Balance, menu bar, lifecycle
-**Status:** core logic merged (Wave A) · app wiring + UI in progress (Wave B)
+**Status:** complete — gate run and recorded below (2026-09-24)
 - [x] Keychain-backed API key: `KeychainStore` + `APIKeySource`, one-time import from the shell rc *(lane KEYCHAIN — 20 tests; the key is never logged, errors never echo it)*
 - [x] Settings model: `AppSettings` + `SettingsStore`, tolerant decoding + clamping (\$2 threshold, 20 min cadence, balance metric) *(lane SETTINGS — 14 tests)*
 - [x] Rate-now presenter: local-time window, countdown, effective per-model prices *(lane RATE — 12 tests; non-vacuity proven by mutating the rounding and watching tests fail)*
 - [x] Balance logic: `BalanceMonitor`, `PollingPlan` (jitter is additive only), `NotificationPolicy` *(lane BALANCE — 30 tests, re-run green under 5 timezones)*
 - [x] Quit affordance: popover Quit button + `make kill`, documented in README
-- [ ] App wiring: import UI replacing the "No API key" dead end, polling on wake/manual, settings sheet, rate-now panel, **translocation banner** (S2 showed real launches running from AppTranslocation)
-- [ ] Launch at login via `SMAppService.mainApp` — **no LaunchAgent fallback**: S3 measured ad-hoc registration working (status `enabled`, no prompt)
-- [ ] Notifications wired to `NotificationPolicy`, with a menu-bar fallback when denied
+- [x] App wiring: import UI replacing the "No API key" dead end, polling on wake/manual, settings panel, rate-now panel, **translocation banner** (S2 showed real launches running from AppTranslocation)
+- [x] Launch at login via `SMAppService.mainApp` — **no LaunchAgent fallback**: S3 measured ad-hoc registration working (status `enabled`, no prompt). The toggle reads the live system status and re-reads it on the ticker
+- [x] Notifications wired to `NotificationPolicy`, with the menu-bar warning glyph as the fallback when the system will not deliver
 - [x] CLI: `deeptally key import|status|delete`, `deeptally rate` *(lane CLI — 418 lines; `rate` correctly reports a Mid-Autumn holiday today, and the key is never printed)*
-- [ ] Docs: `docs/USAGE.md` + privacy update for the Keychain item
-  **Gate:** real balance visible; survives kill/restart, sleep/wake and airplane mode; login item registers on a fresh install.
-  **Lanes:** Wave A (keychain, settings, rate, balance) merged · Wave B (views, cli, integration, docs)
+- [x] Docs: `docs/USAGE.md` + privacy update for the Keychain item
+
+  **Gate evidence (2026-09-24, all observed):**
+  - **Real balance, Keychain only:** rendered the shipping popover with `DEEPSEEK_API_KEY` unset → `keyOrigin: keychain`, `$11.66`, "as of", off-peak panel, no banners.
+  - **Kill/restart:** two consecutive `make smoke` cycles (app alive after 4 s each) plus the persisted reading in the app domain (`...last-reading`, 173 bytes) adopted at launch.
+  - **Wake:** `--spike simulate-wake` → `refreshedOnWake: true`, fetch timestamp advanced 21:44:49Z → 21:44:50Z. *Honest limit:* this proves our handler; delivery on a real lid-open is macOS behaviour and is not simulated.
+  - **`make verify`-class gate:** build · **164 tests in 26 suites** · lint clean · bundle · `codesign --verify --strict` · `make smoke`.
+  - **Independent review:** blocked the gate on two P1 defects and seven P2s; all fixed, each core fix proven by a test that fails without it, and the two P1s re-verified by a forced-low render (`menuBarWarningGlyph: true`, tooltip "DeepSeek balance … is low.") and by a 401 → Forget key → banner-gone sequence.
+  - **Still human-checkable (recorded, not claimed):** offline/airplane mode end to end (deliberately not simulated — it would disrupt the network; the error path itself was exercised by a real 401), and real sleep/wake. A first-run login-item registration was measured in S3 but not re-exercised here, because it would leave a login item pointing at a development path.
+  **Gate:** real balance visible ✅ · survives kill/restart ✅ · sleep/wake handler ✅ (simulated notification) · airplane mode ⏳ human-checkable · login item registers on a fresh install ✅ measured in S3.
+  **Lanes:** Wave A (keychain, settings, rate, balance) · Wave B (views, cli, integration, docs) · Wave C (review fixes: core, app, docs)
 
 ### Step 4 — Ledger, pricing, importer
 - [ ] `LedgerStore` + migrations + dedupe (`raw_hash`); pricing table + holiday calendar + peak/off-peak engine
@@ -255,3 +263,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 2 | Spikes complete. Measured: SMAppService works under ad-hoc (no LaunchAgent needed); notifications grant; Keychain does NOT re-prompt across rebuilds (docs corrected); Gatekeeper exceptions are **per-build**, so every browser-downloaded update needs a fresh approval; App Translocation observed twice on real launches. |
 | 2026-09-24 | 3 | Wave A merged (keychain, settings, rate, balance): 12 files, 150 tests in 25 suites, lint clean. Quit affordance added. Settings-test preference residue reduced from one file per run to exactly one. |
 | 2026-09-24 | 3 | Wave B1 merged (views, CLI): four presentation views + `deeptally rate`/`key` commands. Two spec bugs caught by lanes: `#Preview` cannot compile under CLT (now AGENTS.md gotcha 13) and the CLI had to resolve keys keychain-first for its own advice to work. |
+| 2026-09-24 | 3 | Wave B2 (integration) + B3 (docs, independent review) merged. The review **blocked the gate** on two P1s: the low-balance alert was marked delivered before it was (cooldown consumed even when the post failed, no menu-bar fallback) and the Currency setting was a live control wired to nothing. Also found seven P2s and one stale claim in SECURITY.md. |
+| 2026-09-24 | 3 | Wave C (fixes) merged: 4 core fixes each with a test proven to fail without it, the P1 alert/fallback rework, the ticker re-evaluating staleness and login-item status, a queued refresh after import, banner clearing, the Keychain-problem diagnostic reaching app and CLI, and the real currency in the panel. Also keyed the key import end to end: `deeptally key import --shell zsh`, verified with the environment scrubbed. |
