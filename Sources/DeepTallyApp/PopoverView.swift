@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+import AppKit
 import SwiftUI
 
 struct PopoverView: View {
@@ -70,12 +71,16 @@ struct PopoverView: View {
   }
 
   private var footer: some View {
-    HStack {
+    HStack(spacing: 12) {
       Text("DeepTally \(DeepTallyVersion.current)")
         .font(.caption2)
         .foregroundStyle(.secondary)
       Spacer()
       Text("local-only").font(.caption2).foregroundStyle(.secondary)
+      Button("Quit") { NSApplication.shared.terminate(nil) }
+        .buttonStyle(.link)
+        .font(.caption2)
+        .help("Quit DeepTally")
     }
   }
 }

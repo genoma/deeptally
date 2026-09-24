@@ -40,6 +40,17 @@ make run       # launch the bundled app
 
 `AGENTS.md` documents the toolchain, environment and conventions in detail.
 
+### Quitting
+
+DeepTally is an accessory app (`LSUIElement`): it has no Dock icon and no app menu, so nothing shows up in
+the Dock or the app switcher. To stop it:
+
+- **Quit** in the popover footer, or
+- `make kill` (equivalent to `pkill -f 'DeepTally.app/Contents/MacOS/DeepTally'`).
+
+If the app is running but its status item is hidden, `make kill` is the reliable way out until a menu-bar
+fallback lands.
+
 ## Privacy
 
 DeepTally talks to exactly two hosts: `api.deepseek.com` (balance, models, and — only if you opt in —
