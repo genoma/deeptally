@@ -45,8 +45,9 @@ What the design assumes:
   DeepTally does not pin certificates and does not install a custom CA.
 - **MDM-managed Macs.** Management policy may refuse unsigned apps entirely. That is a deployment policy,
   not a vulnerability in DeepTally.
-- **opencode database.** The import is read-only and limited to the `message` table; the
-  `credential`/`cred_*` tables are never read.
+- **opencode database.** The import is read-only, unions the two live schema generations
+  (`message` and `session_message`, which hold largely disjoint rows), and never reads
+  `credential`/`cred_*`/`account`/`auth` — a SQLite authorizer denies those reads outright.
 
 Out of scope: vulnerabilities in macOS itself, in the DeepSeek API, in opencode, or in third-party tools you
 point at the loopback proxy (v1.1).
