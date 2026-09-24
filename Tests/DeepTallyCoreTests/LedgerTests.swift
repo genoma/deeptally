@@ -302,6 +302,138 @@ struct LedgerWriteTests {
     #expect(try raw.strings(dailyDump) == (try raw.strings(requestAggregateDump)))
   }
 
+  @Test("an upsert repairs counters and cost, and an identical record writes nothing at all")
+  func upsertRepairsAndIsIdempotent() throws {
+    let fixture = try LedgerFixture()
+    defer { fixture.destroy() }
+
+    let at = instant("2026-09-28T02:00:00Z")
+    let key = "hash_rewritten_row"
+    // Stored while the completion was still streaming: a partial counter and the partial cost that
+    // follows from it.
+    let partial = record(
+      at: at,
+      usage: TokenUsage(
+        promptTokens: 100, completionTokens: 10, cacheHitTokens: 0, cacheMissTokens: 100),
+      costUSD: Decimal.parse("0.00003"),
+      sessionID: "ses_rewritten")
+    #expect(
+      try fixture.store.upsert([(record: partial, rawHash: key)])
+        == UpsertOutcome(inserted: 1, updated: 0, unchanged: 0))
+
+    // The same source row after opencode finished: more tokens, and the cost that follows from them.
+    let complete = record(
+      at: at,
+      usage: TokenUsage(
+        promptTokens: 1_000, completionTokens: 100, cacheHitTokens: 700, cacheMissTokens: 300),
+      costUSD: Decimal.parse("0.00042"),
+      sessionID: "ses_rewritten")
+    #expect(
+      try fixture.store.upsert([(record: complete, rawHash: key)])
+        == UpsertOutcome(inserted: 0, updated: 1, unchanged: 0))
+
+    // Repaired in place: one request, the new counters, the new cost.
+    let summary = try fixture.store.summary(since: allTime.since, until: allTime.until)
+    #expect(summary.requestCount == 1)
+    #expect(summary.spendUSD == Decimal.parse("0.00042"))
+    #expect(summary.inputTokens == 300)
+    #expect(summary.cacheReadTokens == 700)
+    #expect(summary.outputTokens == 100)
+
+    let raw = try RawLedger(url: fixture.url)
+    // The repair landed in the rollup too, and the row's own instant was not restated.
+    #expect(try raw.strings(dailyDump) == (try raw.strings(requestAggregateDump)))
+    #expect(
+      try raw.strings("SELECT ts FROM request WHERE raw_hash = '\(key)'")
+        == ["\(Int64(at.timeIntervalSince1970))"])
+
+    // A re-offered record with the same counters must be absorbed without a single write.
+    try raw.execute("CREATE TABLE write_log(writes INTEGER NOT NULL)")
+    try raw.execute("INSERT INTO write_log VALUES (0)")
+    try raw.execute(
+      """
+      CREATE TRIGGER log_request_write AFTER UPDATE ON request
+      BEGIN UPDATE write_log SET writes = writes + 1; END
+      """)
+    let again = try fixture.store.upsert([(record: complete, rawHash: key)])
+    #expect(again == UpsertOutcome(inserted: 0, updated: 0, unchanged: 1))
+    #expect(try raw.strings("SELECT writes FROM write_log") == ["0"])
+    #expect(try fixture.store.summary(since: allTime.since, until: allTime.until) == summary)
+  }
+
+  @Test("an offered record with the same counters leaves a stored cost alone")
+  func upsertLeavesCostAloneWhenCountersMatch() throws {
+    let fixture = try LedgerFixture()
+    defer { fixture.destroy() }
+
+    let at = instant("2026-09-28T02:00:00Z")
+    let key = "hash_cost_only"
+    let usage = TokenUsage(
+      promptTokens: 1_000, completionTokens: 100, cacheHitTokens: 700, cacheMissTokens: 300)
+    // Stored with one cost...
+    #expect(
+      try fixture.store.upsert([
+        (
+          record: record(
+            at: at, usage: usage, costUSD: Decimal.parse("0.001"), sessionID: "ses_cost"),
+          rawHash: key
+        )
+      ]) == UpsertOutcome(inserted: 1, updated: 0, unchanged: 0))
+
+    // ...and re-offered with the same counters and another cost. Repairing money is `reprice`'s job,
+    // so the import must not restate it: a resync that repriced history whenever the table changed
+    // could not answer "what did this import change?".
+    #expect(
+      try fixture.store.upsert([
+        (
+          record: record(
+            at: at, usage: usage, costUSD: Decimal.parse("0.002"), sessionID: "ses_cost"),
+          rawHash: key
+        )
+      ]) == UpsertOutcome(inserted: 0, updated: 0, unchanged: 1))
+    #expect(
+      try fixture.store.summary(since: allTime.since, until: allTime.until).spendUSD
+        == Decimal.parse("0.001"))
+  }
+
+  @Test("a write rebuilds only the days its batch touched; the full rebuild still repairs all")
+  func writeRebuildsOnlyTouchedDays() throws {
+    let fixture = try LedgerFixture()
+    defer { fixture.destroy() }
+
+    let dayOne = instant("2026-09-27T22:00:00Z")
+    let dayTwo = instant("2026-09-28T02:00:00Z")
+    let dayThree = instant("2026-09-29T02:00:00Z")
+    #expect(
+      try fixture.store.insert([
+        simpleRecord(at: dayOne, costUSD: Decimal.parse("0.01"), sessionID: "ses_1"),
+        simpleRecord(at: dayTwo, costUSD: Decimal.parse("0.02"), sessionID: "ses_2"),
+      ]) { $0.sessionID ?? "" } == 2)
+
+    let raw = try RawLedger(url: fixture.url)
+    #expect(try raw.strings(dailyDump) == (try raw.strings(requestAggregateDump)))
+
+    // Stand in for a rollup that drifted: a whole-table rebuild would refresh this day, a
+    // day-restricted one must not touch it.
+    try raw.execute(
+      "UPDATE daily SET cost_micro_usd = 999999, request_count = 99 WHERE date = '2026-09-27'")
+
+    // A row on a third day: its own day is recomputed...
+    #expect(
+      try fixture.store.insert([
+        simpleRecord(at: dayThree, costUSD: Decimal.parse("0.03"), sessionID: "ses_3")
+      ]) { $0.sessionID ?? "" } == 1)
+    let daily = try raw.strings(dailyDump)
+    #expect(daily.contains { $0.hasPrefix("2026-09-29|") && $0.hasSuffix("|30000|1") })
+    // ...and the untouched day keeps whatever it had, which is the point of the restriction.
+    #expect(daily.contains { $0.hasPrefix("2026-09-27|") && $0.hasSuffix("|999999|99") })
+
+    // The explicit whole-table rebuild is the repair for a rollup that drifted; it restores the day.
+    try fixture.store.rebuildDailyRollups()
+    #expect(try raw.strings(dailyDump) == (try raw.strings(requestAggregateDump)))
+    #expect(try raw.strings(dailyDump).count == 3)
+  }
+
   @Test("an empty rawHash is refused instead of silently disabling dedupe")
   func emptyRawHashIsRefused() throws {
     let fixture = try LedgerFixture()

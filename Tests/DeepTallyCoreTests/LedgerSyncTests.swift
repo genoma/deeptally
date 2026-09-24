@@ -62,6 +62,8 @@ struct LedgerSyncTests {
       let outcome = try sync.sync()
 
       #expect(outcome.inserted == 2)
+      #expect(outcome.updated == 0)
+      #expect(outcome.unchanged == 0)
       #expect(outcome.offered == 2)
       #expect(outcome.wasFullScan)
       #expect(outcome.watermark == second.record.timestamp)
@@ -90,6 +92,8 @@ struct LedgerSyncTests {
       // ledger must absorb them as duplicates rather than double-counting the spend.
       #expect(again.offered == 2)
       #expect(again.inserted == 0)
+      #expect(again.updated == 0)
+      #expect(again.unchanged == 2)
       #expect(again.wasFullScan == false)
 
       let day = try ledger.summary(
@@ -111,6 +115,53 @@ struct LedgerSyncTests {
       #expect(resync.wasFullScan)
       #expect(resync.offered == 1)
       #expect(resync.inserted == 0)
+      #expect(resync.updated == 0)
+      #expect(resync.unchanged == 1)
+    }
+  }
+
+  @Test("a full resync repairs a row whose counters and cost the source rewrote")
+  func fullResyncRepairsRewrittenRow() throws {
+    try withLedger { ledger in
+      // One source row, twice: same model and instant, so the same `rawHash`, but the second copy is
+      // what opencode holds after the completion finished streaming.
+      let partial = try record(
+        "2026-09-24T10:00:00Z", input: 1_000, cost: Decimal(string: "0.001")!)
+      let complete = try record(
+        "2026-09-24T10:00:00Z", input: 4_000, cost: Decimal(string: "0.004")!)
+      #expect(partial.rawHash == complete.rawHash)
+
+      _ = try LedgerSync(ledger: ledger, source: FakeSource(bySince: [nil: [partial]])).sync()
+      let resync = try LedgerSync(
+        ledger: ledger, source: FakeSource(bySince: [nil: [complete]])
+      ).fullResync()
+
+      #expect(resync.wasFullScan)
+      #expect(resync.offered == 1)
+      #expect(resync.inserted == 0)
+      #expect(resync.updated == 1)
+      #expect(resync.unchanged == 0)
+
+      // Repaired in place: one request with the source's current counters and cost, not two rows and
+      // not the partial ones the first import stored.
+      let day = try ledger.summary(
+        since: Date(timeIntervalSince1970: 0),
+        until: Date(timeIntervalSince1970: 4_000_000_000))
+      #expect(day.requestCount == 1)
+      #expect(day.spendUSD == Decimal(string: "0.004"))
+      #expect(day.promptTokens == 4_000)
+
+      // The repair is what the ledger now holds, so the next resync changes nothing at all.
+      let again = try LedgerSync(
+        ledger: ledger, source: FakeSource(bySince: [nil: [complete]])
+      ).fullResync()
+      #expect(again.inserted == 0)
+      #expect(again.updated == 0)
+      #expect(again.unchanged == 1)
+      #expect(
+        try ledger.summary(
+          since: Date(timeIntervalSince1970: 0),
+          until: Date(timeIntervalSince1970: 4_000_000_000)) == day)
     }
   }
 
