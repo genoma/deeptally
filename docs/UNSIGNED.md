@@ -111,8 +111,9 @@ The one state it refuses to register from is a translocated copy, whose path is 
 directory that disappears ([`INSTALL.md`](INSTALL.md), [`USAGE.md`](USAGE.md)).
 
 Notifications were measured the same way (S4): the bundle raised the system prompt and returned
-`{"granted":true}`. A denial is a normal outcome, not a failure — the app keeps working and the popover's own
-low-balance notice is the fallback.
+`{"granted":true}`. A denial is a normal outcome, not a failure — the app keeps working, the popover still
+shows the low balance, and the fallback is the **menu-bar warning glyph**: while the balance is low the gauge
+is replaced by a warning triangle whose tooltip names the amount.
 
 ## Managed Macs
 
