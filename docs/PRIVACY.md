@@ -10,7 +10,7 @@ first of them today:
 
 | Host | Purpose | What is sent |
 |---|---|---|
-| `api.deepseek.com` | Account balance (`GET /user/balance`) and model list (`GET /models`) | Your API key as the `Authorization: Bearer …` header, and the request path. Nothing else. |
+| `api.deepseek.com` | Account balance (`GET /user/balance`) — the only request any build makes today. The client also implements the model list (`GET /models`), but nothing calls it yet. | Your API key as the `Authorization: Bearer …` header, and the request path. Nothing else. |
 | `api.github.com` | **Reserved, not used yet** — an update check is the only thing allowed to contact it ([`../AGENTS.md`](../AGENTS.md) §1) | Nothing today: no current build makes this request. TODO: no step in [`PLAN.md`](PLAN.md) schedules the update check, so no release metadata is fetched. |
 
 As with any HTTPS request, the host sees your IP address and the time of the request. DeepTally adds no
@@ -32,14 +32,21 @@ through it, and discards request and response bodies immediately.
 - The `deeptally` CLI resolves the key the same way the app does — **Keychain first, then
   `DEEPSEEK_API_KEY`** — so importing it once makes both halves use the same key. `DEEPSEEK_API_KEY` remains
   your shell's environment; DeepTally never writes it anywhere.
+- A Keychain read that fails (locked keychain, denied item ACL) does not block the environment key: the app
+  reports the problem as a *"Keychain read problem: …"* banner and, when `DEEPSEEK_API_KEY` is set, keeps
+  working with it — and `deeptally key status` prints the same failure as a `keychain:` line. No diagnostic
+  can carry the key itself.
 
 ## The opencode database
 
-If you use opencode, DeepTally can import usage from `~/.local/share/opencode/opencode.db`. That import is:
+If you use opencode, DeepTally will import usage from `~/.local/share/opencode/opencode.db` (the importer
+exists; Step 4 wires it into the ledger). That import is:
 
 - **read-only**;
-- limited to the `message` table (plus schema feature detection);
-- never touching the `credential`/`cred_*` tables, which store credentials in plaintext.
+- limited to the `message` **and** `session_message` tables — opencode ships two live schema generations
+  holding largely different rows, so both are read and deduped — plus column feature detection;
+- never touching the `credential*`, `cred_*`, `account*` or `auth*` tables, which store credentials in
+  plaintext (a SQLite authorizer denies those reads at the connection level).
 
 Only token counters, timestamps, model/provider names and cost fields are read. Message content is not
 extracted, stored or transmitted.
@@ -49,12 +56,12 @@ extracted, stored or transmitted.
 | What | Where | Notes |
 |---|---|---|
 | Usage ledger | `~/Library/Application Support/DeepTally/` (SQLite) | Counters, timestamps, model names and estimated costs. No prompt or completion text. Step 4. |
-| Settings | `~/Library/Preferences/io.github.genoma.deeptally.plist` (`UserDefaults`), key `io.github.genoma.deeptally.settings` | One JSON blob: low-balance threshold, menu bar metric, refresh cadence, notifications on/off, notification cooldown, currency code. |
+| Settings | `~/Library/Preferences/io.github.genoma.deeptally.plist` (`UserDefaults`), key `io.github.genoma.deeptally.settings` | One JSON blob: refresh cadence, low-balance threshold, menu bar metric, notifications on/off and the notification cooldown. It also carries `showSecondaryMetric`, an unused flag that no build reads. No currency is stored: the account currency is shown exactly as the API reports it. |
 | Last balance reading | Same plist, key `io.github.genoma.deeptally.last-reading` | The last successful `/user/balance` answer — amounts, currency, availability flag — plus the instant it was fetched. It exists so a relaunch can show the amount immediately with a truthful "as of" age instead of an empty panel. |
-| Last low-balance alert | Same plist, key `io.github.genoma.deeptally.last-notified` | A timestamp, so the notification cooldown survives a relaunch. |
+| Last low-balance alert | Same plist, key `io.github.genoma.deeptally.last-notified` | A timestamp, written only after macOS accepted the alert, so the cooldown survives a relaunch — while a denied or failed post is retried instead of being recorded as delivered. |
 | API key | One Keychain item: service `io.github.genoma.deeptally`, account `api-key` | Generic password, accessible while the login keychain is unlocked. Never in a file, a preference or a log. |
 | Login item | Registered through `SMAppService` (system-managed) | Removed again by the uninstaller (Step 6), or by turning **Launch at login** off. |
-| Launch diagnostics | `~/Library/Application Support/DeepTally/launch.log` and `last-launch.json` | Step 2 spike output only: bundle path, App Translocation, quarantine flag, and whether an API key was visible in the environment — never a key. **The shipped app never writes this file**: it exists only while the marker `~/Library/Application Support/DeepTally/spike-enabled` does ([`SPIKES.md`](SPIKES.md)). |
+| Launch diagnostics | `~/Library/Application Support/DeepTally/launch.log` (capped at 200 lines) and `last-launch.json` | Step 2 spike output only: bundle path, App Translocation, quarantine flag, and whether `DEEPSEEK_API_KEY` was visible in the environment — a boolean, never the key's value. **The shipped app never writes these files**: they exist only while the marker `~/Library/Application Support/DeepTally/spike-enabled` does ([`SPIKES.md`](SPIKES.md)). |
 
 Never stored, anywhere: prompt or completion content, request or response bodies, message text from the
 opencode database, or your DeepSeek password — DeepTally only ever uses an API key. The balance reading it
@@ -67,7 +74,7 @@ Two things worth stating plainly:
   see usage from other machines, from the web dashboard, or from periods when DeepTally was not running
   ([`PLAN.md`](PLAN.md) §7). That is a capability limit, not a data-collection one.
 - Peak/off-peak classification needs a holiday calendar; it ships as a data file
-  (`Resources/ChinaHolidays.json`) instead of being fetched from a third-party API.
+  (`Sources/DeepTallyCore/Resources/ChinaHolidays.json`) instead of being fetched from a third-party API.
 
 ## Export and delete
 

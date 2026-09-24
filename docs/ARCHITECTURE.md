@@ -65,24 +65,33 @@ both the model and the views need, so neither has to know how a key source, a pr
 calendar is put together — and there is exactly one place where those choices are made:
 
 - `KeychainStore` + `APIKeySource` (Keychain first, then `DEEPSEEK_API_KEY`) and the `KeychainStore` itself,
-  so the app can report *where* a key came from without reading it;
+  so the app can report *where* a key came from without reading it — including a Keychain read that failed
+  and fell back to the environment, which the resolver carries as a sentence for the *"Keychain read
+  problem: …"* banner;
 - `SettingsStore` and `LaunchStateStore` (the last reading and the last alert time);
-- the price table, the merged holiday calendar, `PeakOffPeakEngine` and `RateNowPresenter`;
+- the price table (a valid `~/.config/deeptally/PriceTable.json` override wins over the bundled
+  `PriceTable.json`), the merged holiday calendar, `PeakOffPeakEngine` and `RateNowPresenter`;
 - `makeClient`, which binds one `DeepSeekClient` to the key a refresh resolved, so a re-imported key takes
 effect on the next request instead of being captured at launch.
 
-Composing is **fail-soft**: an unreadable price table or holiday file is recorded as a sentence for the
-popover's banner slot and that part falls back (`PriceTable.unavailable`, an empty calendar) rather than
-stopping the app. Monitor and notification policy are built *for* a threshold and a cooldown, so a settings
-change gets a fresh object instead of an object holding the old value.
+Composing is **fail-soft**: an unreadable bundled price table or holiday file is recorded as a sentence for
+the popover's banner slot and that part falls back (`PriceTable.unavailable`, an empty calendar) rather than
+stopping the app. A present-but-invalid user override is separate: `PriceTableLoader` ignores it in favour of
+the bundled table and returns the reason from `loadWithDiagnostics()` to a caller that has somewhere to show
+it. Monitor and notification policy are built *for* a threshold and a cooldown, so a settings change gets a
+fresh object instead of an object holding the old value.
 
-`AppModel` is the **state owner**. It is `@MainActor @Observable` and owns the key origin, the balance state,
-the rate-now display, the login-item status and the banner list derived from all of them. Three rules it
-keeps: a refresh never runs twice at once; the next refresh always comes from `PollingPlan` (interval, then
-backoff, then additive jitter) rather than a hand-rolled timer chain; nothing blocking runs on the main
-actor (the one blocking call, the key import's shell, runs in a detached task). It re-renders the countdown
-on a 30-second ticker, refreshes on `NSWorkspace.didWakeNotification` and on the unsatisfied → satisfied
-edge of `NWPathMonitor`, and posts low-balance alerts through `NotificationPolicy`.
+`AppModel` is the **state owner**. It is `@MainActor @Observable` and owns the key origin *and the Keychain
+problem that resolution reported*, the balance state, the rate-now display, the login-item status and the
+banner list derived from all of them. Three rules it keeps: a refresh never runs twice at once — a request
+that arrives while one is in flight is *queued*, not dropped, which is what makes "press Import and a refresh
+follows shortly" true; the next refresh always comes from `PollingPlan` (interval, then backoff, then additive
+jitter) rather than a hand-rolled timer chain; nothing blocking runs on the main actor (the one blocking call,
+the key import's shell, runs in a detached task). It re-renders the countdown on a 30-second ticker,
+refreshes on `NSWorkspace.didWakeNotification` and on the unsatisfied → satisfied edge of `NWPathMonitor`, and
+posts low-balance alerts through `NotificationPolicy` — stamping the cooldown only once macOS accepted the
+post, so a denial or a failed post is retried rather than silencing the alert. While macOS will not deliver,
+the menu bar carries a warning glyph instead.
 
 `StatusItemController` owns the `NSStatusItem` and the `NSPopover` and mirrors `AppModel.menuBarLabel` through
 Observation, so the title follows a refresh the model started on its own timer.
@@ -92,8 +101,11 @@ Observation, so the title follows a refresh the model started on its own timer.
 fallback**: an integration spike measured `SMAppService.mainApp.register()` succeeding for an ad-hoc-signed
 bundle with no approval prompt ([`SPIKES.md`](SPIKES.md) S3), so a fallback would be dead code — it is only
 needed if a future macOS changes that. `UserNotificationScheduler` is the only type that touches
-`UNUserNotificationCenter`; a denial is a normal outcome, not an error path (the popover's own low-balance
-notice is the fallback), and a notification carries the amount and threshold, never a key.
+`UNUserNotificationCenter`; a denial is a normal outcome, not an error path — the **menu bar carries a
+warning glyph while the balance is low**, and the settings panel states once that alerts are not delivered.
+`postLowBalance` reports back whether the notification centre accepted the post, and `authorization()` reads
+the live system status, so the caller can tell "not allowed" from "delivery failed"; a notification carries
+the amount and threshold, never a key.
 
 The `Views/` directory and `PopoverView` are **presentation only**: they read state and call closures, run no
 shell, open no Keychain item and know no key. Strings arrive ready to place from the `DeepTallyCore`
@@ -161,15 +173,18 @@ shows "what am I paying right now" instead of a static price list.
 
 - Peak windows are **01:00–04:00 and 06:00–10:00 UTC, Monday–Friday, excluding Chinese public holidays**.
 - Everything else is off-peak, at exactly half the peak price.
-- Classification is always computed **in UTC**, against `Resources/ChinaHolidays.json` (holidays are data,
-  not code).
+- Classification is always computed **in UTC**, against `Sources/DeepTallyCore/Resources/ChinaHolidays.json`
+  (holidays are data, not code).
 - The result is **displayed in the user's local timezone**, with the next transition and a countdown. A
   window label is never derived from local-time arithmetic — only its presentation is local
   ([`../AGENTS.md`](../AGENTS.md) §9.9).
 - For each model the popover shows the effective cache-hit, cache-miss and output price per 1M tokens for
   the current window.
-- Prices and model IDs are never hardcoded in Swift: they load from `Resources/PriceTable.json`, which is
-  versioned data and user-overridable ([`../AGENTS.md`](../AGENTS.md) §9.11).
+- Prices and model IDs are never hardcoded in Swift: they load from
+  `Sources/DeepTallyCore/Resources/PriceTable.json`, which is versioned data and user-overridable
+  ([`../AGENTS.md`](../AGENTS.md) §9.11).
+- The panel labels its prices with the **price table's own currency** (`USD per 1M tokens` for the shipped
+  table). Amounts are never converted ([`PLAN.md`](PLAN.md) §1, decision 13).
 
 ## Source map
 
