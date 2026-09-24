@@ -1,0 +1,12 @@
+{
+  "version": "0.0.0-placeholder",
+  "currency": "USD",
+  "effective_from": "2026-09-24",
+  "off_peak_multiplier": "0.5",
+  "peak_windows_utc": [
+    { "start_hour_utc": 1, "end_hour_utc": 4 },
+    { "start_hour_utc": 6, "end_hour_utc": 10 }
+  ],
+  "holidays": [],
+  "models": []
+}

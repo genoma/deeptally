@@ -11,7 +11,7 @@ All machine facts below were **verified on the development machine on 2026-09-24
 token usage, spend and cache-hit rate. GPL-3.0-or-later. Distributed as an **ad-hoc signed** DMG from
 GitHub Releases (no Apple Developer Program, no notarization, no Homebrew cask).
 
-- App name: `DeepTally` · Bundle ID: `io.github.genoma.deeptally` · CLI: `dtally` · Repo: `deeptally`
+- App name: `DeepTally` · Bundle ID: `io.github.genoma.deeptally` · CLI: `deeptally` · Repo: `deeptally`
 - **The plan of record is [`docs/PLAN.md`](docs/PLAN.md).** Work proceeds step by step; flip the
   checkboxes in the same commit that completes them and add a line to its progress log.
 
@@ -149,8 +149,16 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 7. opencode has **two schema generations** (`message`+`part` and `session_message`) — feature-detect.
 8. macOS 27 hides menu-item symbol images by default in `NSMenu`; use `labelStyle(.titleOnly)` / set
    `preferredImageVisibility` explicitly.
-9. DeepSeek pricing is volatile (model retirements and renames happened three times in 2026) — never
-   hardcode model IDs or prices in Swift; load them from the versioned table.
+9. Peak/off-peak *classification* is computed in UTC against `Resources/ChinaHolidays.json`, but always
+   *displayed* in the user's local timezone, with the next transition and a countdown. Never show a
+   window label that was derived from local-time arithmetic.
+10. **SwiftPM target names must differ by more than letter case, and so must their directories** —
+    APFS is case-insensitive, so `DeepTally` and `deeptally` map to the same `.build` products *and* the
+    same `Sources/` directory (the second target's files silently overwrite the first's). Hence:
+    app target/dir `DeepTallyApp`, CLI target `deeptally` with explicit `path: Sources/DeepTallyCLI`,
+    and the shipped bundle is still `DeepTally.app`.
+11. DeepSeek pricing is volatile (model retirements and renames happened three times in 2026) — never
+    hardcode model IDs or prices in Swift; load them from the versioned table.
 
 ## 10. Definition of done
 

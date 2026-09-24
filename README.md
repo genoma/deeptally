@@ -9,6 +9,9 @@
 - Shows your DeepSeek account balance in the menu bar, with an explicit "as of" timestamp
 - Tallies token usage, spend and **cache-hit rate** from the requests made on your Mac
 - Estimates cost per model, including DeepSeek's peak / off-peak pricing windows
+- Tells you whether you are in a **peak or off-peak window right now** — in your local time — with a countdown
+  to the next switch and the effective price for each model in that window
+- Ships a small CLI (`deeptally balance`) for scripts and terminals
 - Alerts when the balance drops below a threshold you set
 - Starts at login, lives in the menu bar, no Dock icon
 

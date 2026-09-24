@@ -1,7 +1,7 @@
 # DeepTally — implementation plan
 
-**Status:** Step 0 complete · **Last updated:** 2026-09-24 · **Owner:** @genoma
-**Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `dtally`
+**Status:** Step 0 complete · Step 1 in progress · **Last updated:** 2026-09-24 · **Owner:** @genoma
+**Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
 > flipped in the same commit, and a dated line is added to the progress log (§10). Nothing gets built
@@ -19,10 +19,14 @@
 | 4 | Stack | Swift 6.4 + SwiftPM, AppKit `NSStatusItem` + SwiftUI popover, system `libsqlite3` | No Xcode, no third-party deps |
 | 5 | License | **GPL-3.0-or-later** | User requirement; App Store is incompatible by design → GitHub distribution |
 | 6 | Name | **DeepTally** (repo `deeptally`) | 0 GitHub name collisions; "DeepSeek" kept in the README, not the product name |
-| 7 | CLI | `dtally` sharing `DeepTallyCore` | Enables brew **formula** (not cask), scripting, SwiftBar, testability |
+| 7 | CLI | `deeptally` sharing `DeepTallyCore` | Enables brew **formula** (not cask), scripting, SwiftBar, testability. Renamed from `dtally` — too cryptic |
 | 8 | Repo model | **Git flow** (`main`/`develop`, `feature/*`, `release/*`, `hotfix/*`) + **SemVer** + Conventional Commits | User requirement |
 | 9 | Proxy capture | Deferred to v1.1, opt-in, loopback only | v1 covers the real usage path (opencode) already |
 | 10 | Privacy | Local-only, no telemetry, counters never content | Non-negotiable |
+| 11 | Menu bar metric | **balance** | Glanceable, slow-moving |
+| 12 | Low-balance alert | **$2.00** | User choice; configurable in Settings |
+| 13 | Currency | Show the account currency **as-is** (USD or CNY) | No FX guessing; `balance_infos[]` can hold both |
+| 14 | Rate-now indicator | Show **current peak/off-peak window in the user's local timezone**, countdown to the next transition, and the effective $/1M for each model | User idea: the window flips twice a day, so a static price list is less useful than "what am I paying right now" |
 
 ## 2. Non-goals (v1)
 
@@ -85,7 +89,10 @@ usage sources:          │
                           PriceTable.json        ChinaHolidays.json
 ```
 
-**Targets** (`Package.swift`): `DeepTallyCore` (library) · `DeepTally` (app executable) · `dtally` (CLI) · `DeepTallyCoreTests`.
+**Targets** (`Package.swift`): `DeepTallyCore` (library) · `DeepTallyApp` (app executable, bundled as `DeepTally.app`) · `deeptally` (CLI) · `DeepTallyCoreTests`.
+
+> The app target is `DeepTallyApp`, not `DeepTally`: SwiftPM product names must differ by more than case
+> (APFS is case-insensitive), and `DeepTally` vs `deeptally` collided at link time.
 
 **Ledger schema (SQLite, WAL)**
 
@@ -120,14 +127,17 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Gate:** `git log` shows the foundation commit on both branches; repo reachable on GitHub.
 
 ### Step 1 — Buildable skeleton + first parallel lanes
-- [ ] `Package.swift` (macOS 15, Swift 6 mode, 4 targets), `Makefile`
-- [ ] `DeepTallyCore`: types, errors, `DeepSeekClient` (balance + models), `PriceTable` loader, `CostEngine`,
-      `PeakOffPeak`, `OpenCodeImporter`, `LedgerStore` (SQLite)
-- [ ] `DeepTally` app: `NSStatusItem` + `NSPopover` + SwiftUI popover shell; `LSUIElement`; ad-hoc bundle
-- [ ] `dtally` CLI: `--version`, `balance`, `usage --json`
-- [ ] `Scripts/bundle.sh` + `Scripts/make-icon.swift` + `Resources/AppIcon.icns` + menu bar template glyph
-- [ ] 16px-legible icon in Golden Gate style (glass squircle, depth-gauge glyph), README hero
-  **Gate:** `make build && make test && make bundle` succeed locally with CLT only; `dtally balance` prints a real balance; app shows a status item.
+- [x] `Package.swift` (macOS 15, Swift 6 mode, 4 targets), `Makefile`, `.swift-format`
+- [x] `DeepTallyCore`: types, errors, `DeepSeekClient` (balance + models) — verified against the live API
+- [x] `DeepTallyApp` shell: `NSStatusItem` + `NSPopover` + SwiftUI popover; `LSUIElement`; ad-hoc bundle builds
+- [x] `deeptally` CLI: `--version`, `balance` (real balance verified 2026-09-24), `usage` stub
+- [x] `Scripts/bundle.sh` — hand-assembled `DeepTally.app`, ad-hoc signed, `codesign --verify` clean
+- [ ] `PriceTable` loader, `PeakOffPeak`, `CostEngine` + holiday calendar *(lane PRICING)*
+- [ ] usage/SSE parsing + error mapping *(lane API)*
+- [ ] opencode importer *(lane OPENCODE)*
+- [ ] `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar glyph, README hero *(lane ICON)*
+- [ ] `docs/` set: INSTALL, UNSIGNED, PRIVACY, ARCHITECTURE, DEVELOPMENT, RELEASING + SECURITY/CONTRIBUTING *(lane DOCS)*
+  **Gate:** `make build && make test && make bundle` pass with CLT only ✅ 2026-09-24 · `deeptally balance` prints a real balance ✅ · status item visible ⏳ needs a human look.
   **Lanes:** ICON, PRICING, API, OPENCODE, DOCS (see §6) — parent owns Package.swift/Makefile/UI/scripts.
 
 ### Step 2 — M0 spikes (evidence, not features)
@@ -145,12 +155,15 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [ ] Low-balance notification; `UNUserNotificationCenter` with menu-bar badge fallback
 - [ ] Launch at login: `SMAppService` primary, `LaunchAgent` fallback (per S3)
 - [ ] Offline/wake handling (`NWPathMonitor`, `NSWorkspace.didWakeNotification`)
+- [ ] **Rate-now indicator**: peak/off-peak computed in UTC, displayed in the user's local timezone, with the next
+      transition and a countdown; effective cache-hit/cache-miss/output $/1M for the current window per model
+- [ ] Settings: alert threshold, menu bar metric mode, refresh cadence, currency display
   **Gate:** real balance visible; survives kill/restart, sleep/wake and airplane mode; login item registers on a fresh install.
 
 ### Step 4 — Ledger, pricing, importer
 - [ ] `LedgerStore` + migrations + dedupe (`raw_hash`); pricing table + holiday calendar + peak/off-peak engine
 - [ ] opencode importer (read-only, feature-detected, resumable, never credential tables)
-- [ ] `dtally usage --json` and `dtally import --opencode`
+- [ ] `deeptally usage --json` and `deeptally import --opencode`
   **Gate:** cost computed for a known opencode session matches a hand-calculated value; importer is idempotent.
 
 ### Step 5 — Analytics popover + exports
@@ -163,7 +176,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [ ] In-app *Uninstall DeepTally…*: unregister login item, move app to Trash, purge app-support/prefs/caches, delete Keychain item, optional ledger export
 - [ ] `.github/workflows/ci.yml` (build, test, lint, SPDX-header grep, codesign verify) and `release.yml` (tag → DMG + `SHA256SUMS` + release)
 - [ ] `docs/INSTALL.md`, `docs/UNSIGNED.md`, `docs/PRIVACY.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `SECURITY.md`, `CONTRIBUTING.md`
-- [ ] Homebrew **formula** tap for `dtally` only; GitHub Immutable Releases enabled
+- [ ] Homebrew **formula** tap for `deeptally` only; GitHub Immutable Releases enabled
   **Gate:** `install → uninstall → reinstall` leaves no residue (verified with a throwaway `HOME`), and the DMG works on a second macOS version.
 
 ### Step 7 — v0.1.0
@@ -202,12 +215,15 @@ SemVer, `0.y.z` until stable. `feature/*` → `develop`; `release/x.y.z` cut fro
 merged `--no-ff` into `main`, tagged `vX.Y.Z`; `hotfix/*` branch from `main`, merged to both. Conventional
 Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, published with Immutable Releases on.
 
-## 9. Open decisions
+## 9. Decisions resolved (2026-09-24)
 
-- [ ] Menu bar default metric (proposed: **balance**) — confirm in Step 3 with a real UI
-- [ ] Low-balance default threshold (proposed: **$2.00**)
-- [ ] Whether to publish the CLI formula to a personal tap in Step 6 (proposed: **yes**)
-- [ ] CNY display: convert or show account currency as-is (proposed: **as-is**)
+| Question | Answer |
+|---|---|
+| Menu bar default metric | **balance** |
+| Low-balance threshold | **$2.00**, surfaced in Settings (DeepSeek's own platform also flags a low balance, so this matches the mental model) |
+| Personal tap with a `deeptally` formula | **yes**, Step 6 (CLI only — never a cask) |
+| CNY handling | **show as-is**, never convert |
+| Off-peak visibility | **rate-now indicator** in local time + countdown + effective prices |
 
 ## 10. Progress log
 
@@ -215,3 +231,6 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 |---|---|---|
 | 2026-09-24 | 0 | Repo created, license/README/AGENTS/plan committed, remotes pushed |
 | 2026-09-24 | 2 | S6 (quarantine/curl) and S7 (live API probe) verified during planning |
+| 2026-09-24 | — | Decisions resolved: balance metric, $2 threshold, tap yes, CNY as-is, rate-now indicator added; CLI renamed `dtally` → `deeptally` |
+| 2026-09-24 | 1 | Skeleton builds: `DeepTallyCore` + `DeepTallyApp` + `deeptally`, 5 tests green, ad-hoc bundle verified, live balance via CLI |
+| 2026-09-24 | 1 | Traps fixed + documented: APFS case-insensitivity merged `DeepTally`/`deeptally` paths; CLT needs `-plugin-path .../plugins/testing` for swift-testing macros |
