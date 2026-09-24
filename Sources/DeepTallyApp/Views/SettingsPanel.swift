@@ -1,0 +1,238 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+import DeepTallyCore
+import SwiftUI
+
+/// Everything the user can change, as controls over the settings binding the owner supplies.
+///
+/// The panel writes only through `settings` and reports actions by calling the closures; it runs no
+/// shell, opens no Keychain item and knows no key (AGENTS.md §5).
+struct SettingsPanel: View {
+  /// Kept in step with the ranges `AppSettings.validated()` enforces; the controls need them to
+  /// stop at the same limits instead of letting a value be clamped behind the user's back.
+  private static let refreshIntervalRange = 5...240
+  private static let cooldownRange = 15...10_080
+
+  @Binding private var settings: AppSettings
+  private let isImportingKey: Bool
+  private let importMessage: String?
+  private let onImportFromShell: (ShellKind) -> Void
+  private let onDeleteKey: () -> Void
+
+  init(
+    settings: Binding<AppSettings>,
+    isImportingKey: Bool,
+    importMessage: String?,
+    onImportFromShell: @escaping (ShellKind) -> Void,
+    onDeleteKey: @escaping () -> Void
+  ) {
+    _settings = settings
+    self.isImportingKey = isImportingKey
+    self.importMessage = importMessage
+    self.onImportFromShell = onImportFromShell
+    self.onDeleteKey = onDeleteKey
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      Text("Settings")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+
+      VStack(alignment: .leading, spacing: 8) {
+        refreshRow
+        thresholdRow
+        metricRow
+      }
+
+      VStack(alignment: .leading, spacing: 8) {
+        notificationsRow
+        cooldownRow
+      }
+
+      VStack(alignment: .leading, spacing: 8) {
+        currencyRow
+        keyRow
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  // MARK: - Refresh, threshold, menu bar
+
+  private var refreshRow: some View {
+    labeledRow("Refresh every") {
+      HStack(spacing: 6) {
+        Text("\(settings.refreshIntervalMinutes) min")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+        Stepper("", value: $settings.refreshIntervalMinutes, in: Self.refreshIntervalRange)
+          .labelsHidden()
+          .controlSize(.small)
+          .accessibilityLabel("Refresh interval in minutes")
+      }
+    }
+  }
+
+  /// Money stays `Decimal` end to end: the field binds the value directly, and `AppSettings` clamps
+  /// it when the settings are saved.
+  private var thresholdRow: some View {
+    labeledRow("Low-balance threshold") {
+      TextField("", value: $settings.lowBalanceThreshold, format: .number)
+        .textFieldStyle(.roundedBorder)
+        .font(.caption.monospacedDigit())
+        .multilineTextAlignment(.trailing)
+        .frame(width: 68)
+        .accessibilityLabel("Low-balance threshold in the account currency")
+        .help("Compared with the account balance as reported — never converted.")
+    }
+  }
+
+  private var metricRow: some View {
+    labeledRow("Menu bar") {
+      Picker("Menu bar metric", selection: $settings.menuBarMetric) {
+        ForEach(MenuBarMetric.allCases, id: \.self) { metric in
+          Text(Self.label(for: metric)).tag(metric)
+        }
+      }
+      .labelsHidden()
+      .pickerStyle(.menu)
+      .fixedSize()
+      .accessibilityLabel("Menu bar metric")
+    }
+  }
+
+  private static func label(for metric: MenuBarMetric) -> String {
+    switch metric {
+    case .balance: return "Balance"
+    case .todaySpend: return "Today's spend"
+    case .cacheHitRate: return "Cache-hit rate"
+    }
+  }
+
+  // MARK: - Notifications
+
+  private var notificationsRow: some View {
+    labeledRow("Notify on low balance") {
+      Toggle("", isOn: $settings.notificationsEnabled)
+        .labelsHidden()
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .accessibilityLabel("Notify when the balance is low")
+    }
+  }
+
+  private var cooldownRow: some View {
+    labeledRow("Notify again after") {
+      HStack(spacing: 6) {
+        Text(Self.cooldownText(settings.notificationCooldownMinutes))
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+        Stepper(
+          "",
+          value: $settings.notificationCooldownMinutes,
+          in: Self.cooldownRange,
+          step: 30
+        )
+        .labelsHidden()
+        .controlSize(.small)
+        .accessibilityLabel("Notification cooldown in minutes")
+      }
+    }
+    .disabled(!settings.notificationsEnabled)
+  }
+
+  /// Whole hours once the cooldown passes an hour, because "720 min" is a number nobody reads.
+  private static func cooldownText(_ minutes: Int) -> String {
+    guard minutes >= 60 else { return "\(minutes) min" }
+    let hours = minutes / 60
+    let rest = minutes % 60
+    return rest == 0 ? "\(hours)h" : "\(hours)h \(rest)m"
+  }
+
+  // MARK: - Currency and key
+
+  private var currencyRow: some View {
+    labeledRow("Currency") {
+      TextField("as-is", text: $settings.currencyCode)
+        .textFieldStyle(.roundedBorder)
+        .font(.caption)
+        .multilineTextAlignment(.trailing)
+        .frame(width: 68)
+        .accessibilityLabel("Currency code, empty shows the account currency as-is")
+        .help("Leave empty to show the account currency exactly as the API reports it.")
+    }
+  }
+
+  private var keyRow: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      labeledRow("Import from shell") {
+        HStack(spacing: 6) {
+          ForEach(ShellKind.allCases, id: \.self) { shell in
+            Button(shell.rawValue) { onImportFromShell(shell) }
+              .controlSize(.small)
+              .disabled(isImportingKey)
+              .accessibilityLabel("Import API key from \(shell.rawValue)")
+          }
+        }
+      }
+
+      HStack(spacing: 8) {
+        Button("Forget key") { onDeleteKey() }
+          .controlSize(.small)
+          .disabled(isImportingKey)
+          .accessibilityLabel("Forget the stored API key")
+        Spacer(minLength: 8)
+        if isImportingKey {
+          ProgressView()
+            .controlSize(.small)
+            .accessibilityLabel("Importing the API key")
+        }
+      }
+
+      // Caller-supplied: an import report or an error. Never the key, which only ever goes into the
+      // Keychain (AGENTS.md §5).
+      if let importMessage {
+        Text(importMessage)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+          .accessibilityLabel("Key import status")
+      }
+    }
+  }
+
+  // MARK: - Row layout
+
+  private func labeledRow<Control: View>(
+    _ label: String,
+    @ViewBuilder control: () -> Control
+  ) -> some View {
+    HStack(spacing: 8) {
+      Text(label)
+        .font(.caption)
+      Spacer(minLength: 8)
+      control()
+    }
+  }
+}
+
+// Previews use `PreviewProvider` rather than `#Preview`: the `#Preview` macro is implemented by the
+// `PreviewsMacros` plugin, which ships with Xcode, and this repo builds with Command Line Tools only
+// — expanding it there fails with "plugin for module 'PreviewsMacros' not found". Do not rewrite
+// these as `#Preview` unless that plugin becomes available.
+struct SettingsPanelPreviews: PreviewProvider {
+  /// A constant binding: previews cannot hold `@State` here either — that is a `SwiftUIMacros`
+  /// plugin macro, unavailable to a Command Line Tools build just like `#Preview`. The controls are
+  /// therefore inert in the canvas; the real binding comes from the app.
+  static var previews: some View {
+    SettingsPanel(
+      settings: .constant(AppSettings.default),
+      isImportingKey: false,
+      importMessage: "Imported a key from zsh.",
+      onImportFromShell: { _ in },
+      onDeleteKey: {}
+    )
+    .padding(14)
+    .frame(width: 320)
+  }
+}
