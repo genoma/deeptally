@@ -38,7 +38,6 @@ struct SettingsTests {
     #expect(settings.notificationsEnabled)
     #expect(settings.notificationCooldownMinutes == 720)
     #expect(!settings.showSecondaryMetric)
-    #expect(settings.currencyCode.isEmpty)
   }
 
   @Test("a fresh store loads AppSettings.default")
@@ -83,8 +82,7 @@ struct SettingsTests {
         menuBarMetric: .todaySpend,
         notificationsEnabled: false,
         notificationCooldownMinutes: 1_440,
-        showSecondaryMetric: true,
-        currencyCode: "EUR"
+        showSecondaryMetric: true
       )
 
       store.save(settings)
@@ -140,13 +138,29 @@ struct SettingsTests {
   func wrongTypeResetsOnlyThatField() {
     withIsolatedDefaults { defaults in
       defaults.set(
-        Data(#"{"refreshIntervalMinutes": "soon", "currencyCode": "JPY"}"#.utf8),
+        Data(#"{"refreshIntervalMinutes": "soon", "showSecondaryMetric": true}"#.utf8),
         forKey: settingsKey)
 
       let loaded = SettingsStore(defaults: defaults).load()
 
       #expect(loaded.refreshIntervalMinutes == 20)
-      #expect(loaded.currencyCode == "JPY")
+      #expect(loaded.showSecondaryMetric)
+    }
+  }
+
+  /// The Currency setting was removed: the account currency is shown as-is (PLAN.md decision 13) and
+  /// nothing read the chosen code. A blob written before the removal still carries the key, and an
+  /// unknown key must decode rather than throw the whole blob away.
+  @Test("a stored blob that still carries the removed currency key decodes")
+  func removedCurrencyKeyIsIgnored() {
+    withIsolatedDefaults { defaults in
+      defaults.set(Data(#"{"currencyCode": "EUR"}"#.utf8), forKey: settingsKey)
+      #expect(SettingsStore(defaults: defaults).load() == AppSettings.default)
+    }
+    withIsolatedDefaults { defaults in
+      defaults.set(
+        Data(#"{"currencyCode": "EUR", "refreshIntervalMinutes": 60}"#.utf8), forKey: settingsKey)
+      #expect(SettingsStore(defaults: defaults).load() == AppSettings(refreshIntervalMinutes: 60))
     }
   }
 
@@ -193,7 +207,7 @@ struct SettingsTests {
   func storedBlobIsInspectableJSON() {
     withIsolatedDefaults { defaults in
       let store = SettingsStore(defaults: defaults)
-      store.save(AppSettings(lowBalanceThreshold: Decimal.parse("12.75"), currencyCode: "EUR"))
+      store.save(AppSettings(lowBalanceThreshold: Decimal.parse("12.75")))
 
       guard let blob = defaults.data(forKey: settingsKey),
         let object = try? JSONSerialization.jsonObject(with: blob) as? [String: Any]
@@ -204,7 +218,8 @@ struct SettingsTests {
 
       #expect(object["lowBalanceThreshold"] as? String == "12.75")
       #expect(object["menuBarMetric"] as? String == "balance")
-      #expect(object["currencyCode"] as? String == "EUR")
+      // The Currency setting is gone, so nothing writes a currency key any more.
+      #expect(object["currencyCode"] == nil)
     }
   }
 }

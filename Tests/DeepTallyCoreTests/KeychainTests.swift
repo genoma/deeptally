@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
+import Security
 import Testing
 
 @testable import DeepTallyCore
@@ -122,9 +123,15 @@ final class APIKeySourceTests: Sendable {
 
   private func source(
     environment: [String: String] = [:],
-    runner: APIKeySource.ShellRunner? = nil
+    runner: APIKeySource.ShellRunner? = nil,
+    keychainReader: APIKeySource.KeychainReader? = nil
   ) -> APIKeySource {
-    APIKeySource(keychain: store, environment: environment, shellRunner: runner)
+    APIKeySource(
+      keychain: store,
+      environment: environment,
+      shellRunner: runner,
+      keychainReader: keychainReader
+    )
   }
 
   @Test("currentKey prefers the Keychain over the environment")
@@ -144,6 +151,70 @@ final class APIKeySourceTests: Sendable {
   func currentKeyIsNilWhenNeitherSourceHasOne() throws {
     let source = source()
     #expect(try source.currentKey() == nil)
+  }
+
+  @Test("currentKey falls back to the environment when the Keychain read itself fails")
+  func currentKeyUsesEnvironmentAfterKeychainFailure() throws {
+    let source = source(
+      environment: ["DEEPSEEK_API_KEY": envKey],
+      keychainReader: { throw KeychainError.unexpectedStatus(errSecInteractionNotAllowed) })
+
+    #expect(try source.currentKey() == envKey)
+  }
+
+  @Test("resolve() reports the Keychain, the key and no problem when an item exists")
+  func resolvePrefersKeychain() throws {
+    try store.store(fakeKey)
+
+    let resolution = source(environment: ["DEEPSEEK_API_KEY": envKey]).resolve()
+
+    #expect(resolution.origin == .keychain)
+    #expect(resolution.key == fakeKey)
+    #expect(resolution.keychainProblem == nil)
+  }
+
+  @Test("resolve() falls back to the environment when the Keychain is empty")
+  func resolveFallsBackToEnvironment() {
+    let resolution = source(environment: ["DEEPSEEK_API_KEY": envKey]).resolve()
+
+    #expect(resolution.origin == .environment)
+    #expect(resolution.key == envKey)
+    #expect(resolution.keychainProblem == nil)
+  }
+
+  /// The finding this covers: a Keychain read error used to be rethrown, so a valid `DEEPSEEK_API_KEY`
+  /// was never consulted and the app reported "unreadable" while a usable key sat right there.
+  @Test("a failed Keychain read still uses DEEPSEEK_API_KEY and reports the failure")
+  func resolveUsesEnvironmentAfterKeychainFailure() {
+    let resolution = source(
+      environment: ["DEEPSEEK_API_KEY": envKey],
+      keychainReader: { throw KeychainError.unexpectedStatus(errSecInteractionNotAllowed) }
+    ).resolve()
+
+    #expect(resolution.origin == .environment)
+    #expect(resolution.key == envKey)
+    let problem = resolution.keychainProblem
+    #expect(problem != nil)
+    // The diagnostic names the status and nothing that could be part of a secret.
+    #expect(problem?.contains("\(errSecInteractionNotAllowed)") == true)
+    #expect(problem?.contains(fakeKey) != true)
+    #expect(problem?.contains(envKey) != true)
+  }
+
+  @Test("a denied item ACL reports the failure and no origin")
+  func resolveReportsDeniedKeychainWithoutEnvironment() {
+    let resolution = source(
+      keychainReader: { throw KeychainError.unexpectedStatus(errSecAuthFailed) }
+    ).resolve()
+
+    #expect(resolution.origin == .none)
+    #expect(resolution.key == nil)
+    #expect(resolution.keychainProblem?.contains("\(errSecAuthFailed)") == true)
+  }
+
+  @Test("resolve() is .none with no problem when nothing has a key")
+  func resolveWithoutAnyKey() {
+    #expect(source().resolve() == KeyResolution(origin: .none, key: nil, keychainProblem: nil))
   }
 
   @Test("currentKey treats a blank environment value as absent")

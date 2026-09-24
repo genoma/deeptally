@@ -20,8 +20,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
   public var notificationsEnabled: Bool
   public var notificationCooldownMinutes: Int
   public var showSecondaryMetric: Bool
-  /// `""` means "show the account currency exactly as the API reports it".
-  public var currencyCode: String
 
   public init(
     refreshIntervalMinutes: Int = 20,
@@ -29,8 +27,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
     menuBarMetric: MenuBarMetric = .balance,
     notificationsEnabled: Bool = true,
     notificationCooldownMinutes: Int = 720,
-    showSecondaryMetric: Bool = false,
-    currencyCode: String = ""
+    showSecondaryMetric: Bool = false
   ) {
     self.refreshIntervalMinutes = refreshIntervalMinutes
     self.lowBalanceThreshold = lowBalanceThreshold
@@ -38,7 +35,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     self.notificationsEnabled = notificationsEnabled
     self.notificationCooldownMinutes = notificationCooldownMinutes
     self.showSecondaryMetric = showSecondaryMetric
-    self.currencyCode = currencyCode
   }
 
   /// What a fresh install starts from, and the fallback for anything unreadable.
@@ -77,7 +73,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     case notificationsEnabled
     case notificationCooldownMinutes
     case showSecondaryMetric
-    case currencyCode
   }
 
   /// Tolerant by design: a missing key, a value of the wrong type, or a `menuBarMetric` string this
@@ -102,9 +97,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     showSecondaryMetric =
       (try? container.decodeIfPresent(Bool.self, forKey: .showSecondaryMetric))
       ?? fallback.showSecondaryMetric
-    currencyCode =
-      (try? container.decodeIfPresent(String.self, forKey: .currencyCode))
-      ?? fallback.currencyCode
   }
 
   public func encode(to encoder: any Encoder) throws {
@@ -115,7 +107,6 @@ public struct AppSettings: Codable, Sendable, Equatable {
     try container.encode(notificationsEnabled, forKey: .notificationsEnabled)
     try container.encode(notificationCooldownMinutes, forKey: .notificationCooldownMinutes)
     try container.encode(showSecondaryMetric, forKey: .showSecondaryMetric)
-    try container.encode(currencyCode, forKey: .currencyCode)
   }
 
   /// Money is a JSON **string** in this project (`Decimal.parse` in `Types.swift`), which is what

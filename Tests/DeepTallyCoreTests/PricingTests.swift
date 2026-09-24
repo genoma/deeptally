@@ -50,6 +50,10 @@ private func fixtureTable(
   )
 }
 
+/// A class in this test bundle, which carries no resources: `Bundle(for:)` on it is how the
+/// "shipped table is missing" path is exercised without touching the real package.
+private final class TestBundleAnchor: NSObject {}
+
 private func makeTemporaryHome() throws -> URL {
   let home = URL(fileURLWithPath: NSTemporaryDirectory())
     .appending(path: "deeptally-pricing-tests-\(UUID().uuidString)")
@@ -179,6 +183,93 @@ struct PriceTableLoaderTests {
     try writeOverride(fixtureTable(version: "override-without-models", models: []), in: home)
     #expect(throws: PricingDataError.noModels) { try loader.loadOverride() }
     #expect(try loader.load().version == "2026-09-24")
+  }
+
+  @Test("a valid override wins and reports no problem")
+  func diagnosticsForValidOverride() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    try writeOverride(fixtureTable(version: "override"), in: home)
+
+    let (table, problem) = try PriceTableLoader(homeDirectory: home).loadWithDiagnostics()
+
+    #expect(table.version == "override")
+    #expect(problem == nil)
+  }
+
+  @Test("no override at all reports no problem")
+  func diagnosticsWithoutOverride() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+
+    let (table, problem) = try PriceTableLoader(homeDirectory: home).loadWithDiagnostics()
+
+    #expect(table.version == "2026-09-24")
+    #expect(problem == nil)
+  }
+
+  /// The finding this covers: `load()`'s `try?` swallowed the override failure, so the app could only
+  /// ever see the bundled-file error and its banner was unreachable for a user-file problem.
+  @Test("an invalid override falls back to the bundled table and names the file and the reason")
+  func diagnosticsForInvalidOverride() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(homeDirectory: home)
+    let path = loader.overrideURL.path(percentEncoded: false)
+
+    try writeOverride(#"{"version": "not-a-table"}"#, in: home)
+    let (undecodable, decodeProblem) = try loader.loadWithDiagnostics()
+    #expect(undecodable.version == "2026-09-24")
+    #expect(try #require(decodeProblem).contains(path))
+
+    // A file that decodes but breaks a rule is the same story, with the rule named.
+    try writeOverride(fixtureTable(version: "override-without-models", models: []), in: home)
+    let (unvalidatable, validationProblem) = try loader.loadWithDiagnostics()
+    #expect(unvalidatable.version == "2026-09-24")
+    let sentence = try #require(validationProblem)
+    #expect(sentence.contains(path))
+    #expect(sentence.contains("no models"))
+  }
+
+  @Test("an unreadable override falls back to the bundled table and names the file")
+  func diagnosticsForUnreadableOverride() throws {
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(homeDirectory: home)
+
+    // A directory where the override belongs: it exists, so it is not "no override", and it cannot
+    // be read as a table.
+    try FileManager.default.createDirectory(
+      at: loader.overrideURL, withIntermediateDirectories: true)
+
+    let (table, problem) = try loader.loadWithDiagnostics()
+
+    #expect(table.version == "2026-09-24")
+    let sentence = try #require(problem)
+    #expect(sentence.contains(loader.overrideURL.path(percentEncoded: false)))
+    #expect(sentence.contains("unreadable"))
+  }
+
+  @Test("a bundle without the shipped table still throws, override or not")
+  func bundledFailureStillSurfaces() throws {
+    let bundle = Bundle(for: TestBundleAnchor.self)
+    // This test is only meaningful while the test bundle really carries no shipped table.
+    #expect(bundle.url(forResource: "PriceTable", withExtension: "json") == nil)
+
+    let home = try makeTemporaryHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let loader = PriceTableLoader(bundle: bundle, homeDirectory: home)
+
+    #expect(throws: PricingDataError.resourceMissing(name: "PriceTable.json")) {
+      try loader.loadWithDiagnostics()
+    }
+
+    // A broken override cannot mask a missing bundled table: there is nothing left to price with.
+    try writeOverride(#"{"version": "not-a-table"}"#, in: home)
+    #expect(throws: PricingDataError.resourceMissing(name: "PriceTable.json")) {
+      try loader.loadWithDiagnostics()
+    }
+    #expect(throws: PricingDataError.resourceMissing(name: "PriceTable.json")) { try loader.load() }
   }
 }
 

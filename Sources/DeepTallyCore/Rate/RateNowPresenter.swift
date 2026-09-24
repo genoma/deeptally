@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-/// One model's effective price for the period that is in force right now, in USD per 1M tokens.
+/// One model's effective price for the period that is in force right now, in the price table's
+/// currency per 1M tokens.
 public struct ModelRate: Sendable, Equatable {
   public let model: String
   public let cacheHit: Decimal
@@ -36,7 +37,12 @@ public struct RateNowDisplay: Sendable, Equatable {
   public let countdown: String
   /// The same end instant including the local weekday, e.g. "Thu 18:00"; "—" when unknown.
   public let nextTransitionLocal: String
-  /// The effective prices of the current period, one row per model in table order.
+  /// The price table's currency code, e.g. `"USD"`: the unit every ``models`` amount is in.
+  ///
+  /// Taken from the table rather than assumed, so a table that prices in another currency says so.
+  /// Amounts are never converted — the currency is shown as-is (PLAN.md decision 13).
+  public let currency: String
+  /// The effective prices of the current period, one row per model in table order, in ``currency``.
   public let models: [ModelRate]
 
   /// Public so the app target can build previews and fixtures without testability access.
@@ -48,6 +54,7 @@ public struct RateNowDisplay: Sendable, Equatable {
     windowEndsLocal: String,
     countdown: String,
     nextTransitionLocal: String,
+    currency: String,
     models: [ModelRate]
   ) {
     self.periodLabel = periodLabel
@@ -57,6 +64,7 @@ public struct RateNowDisplay: Sendable, Equatable {
     self.windowEndsLocal = windowEndsLocal
     self.countdown = countdown
     self.nextTransitionLocal = nextTransitionLocal
+    self.currency = currency
     self.models = models
   }
 }
@@ -104,6 +112,7 @@ public struct RateNowPresenter: Sendable {
       windowEndsLocal: wallClock(snapshot.nextTransition, format: Self.clockFormat),
       countdown: Self.countdown(until: snapshot.nextTransition, from: date),
       nextTransitionLocal: wallClock(snapshot.nextTransition, format: Self.weekdayClockFormat),
+      currency: table.currency,
       models: effectiveRates(multiplier: snapshot.multiplier)
     )
   }
