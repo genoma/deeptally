@@ -184,10 +184,29 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Lanes:** Wave A (keychain, settings, rate, balance) · Wave B (views, cli, integration, docs) · Wave C (review fixes: core, app, docs)
 
 ### Step 4 — Ledger, pricing, importer
-- [ ] `LedgerStore` + migrations + dedupe (`raw_hash`); pricing table + holiday calendar + peak/off-peak engine
-- [ ] opencode importer (read-only, feature-detected, resumable, never credential tables)
-- [ ] `deeptally usage --json` and `deeptally import --opencode`
-  **Gate:** cost computed for a known opencode session matches a hand-calculated value; importer is idempotent.
+**Status:** complete except the D5 wave in flight (app self-heal + independent review)
+- [x] `LedgerStore` over the system `libsqlite3` with schema versioning from v1, `INSERT OR IGNORE` dedupe on `raw_hash`, UTC-keyed daily rollups, pruning, CSV round-trip *(lane LEDGER — 16 tests; money is INTEGER micro-USD because this project refuses Double for money; the store is deliberately not `Sendable`, which the compiler enforces)*
+- [x] Importer extended with an incremental `since:` watermark, and `LedgerSync` as the one flow the CLI and the app share *(the ledger owns the watermark, because the ledger is what knows which rows committed)*
+- [x] CLI: `deeptally import [--full]`, `deeptally usage [--json] [--days N]`, `deeptally ledger export|prune|reprice`
+- [x] Menu-bar metrics: `todaySpend` and `cacheHitRate` enabled, fed by an actor that imports on launch and every 15 minutes off the main actor
+- [x] **Model aliases as data**: `ModelPrice.aliases` + a four-rule resolver (exact id, exact alias, last path component against ids, then against aliases), case-sensitive, `nil` for anything unrecognised; collisions rejected loudly via `PricingDataError.duplicateAlias`
+- [x] **`reprice`**, the repair path for rows already stored with a wrong cost
+- [x] One user-facing sentence per error, defined once (the three duplicated switches are gone)
+
+  **The finding that mattered (2026-09-24).** Importing the real opencode database showed 4,237 of 5,275 rows stored at **$0** — opencode writes model ids the price table did not list (`deepseek/deepseek-v4-flash-vision-exp`, `deepseek-v4-flash`, `deepseek-v4-pro-0813`, …), and Step 1's research had already recorded that those ids route to the V4.1-Flash and V4-Pro prices. Two flaws compounded: a resolution gap, and a stored cost that re-importing could never repair, because `raw_hash` treats those rows as duplicates. Fixed by aliases (data, so the next rename is a JSON edit) plus `reprice`. Result on the real ledger:
+
+  | | before | after |
+  |---|---|---|
+  | rows at $0 | 4,237 of 5,275 | **0** |
+  | total spend | $3.754373 | **$14.378060** |
+  | unpriced models | 5 | **none** |
+
+  **Gate evidence (all observed):**
+  - **Idempotence:** `import` twice → `Imported 5275 new rows` then `Imported 0 new rows of 0 offered`; `import --full` → `0 new rows of 5275 offered`.
+  - **Hand-calculated cost, independently derived in SQL from the price table's own numbers:** every row of two real sessions matches exactly (flash 6/6 rows, v4-pro 1/1). Across the whole ledger the float-SQL cross-check agrees on **5,274 of 5,275 rows**; the single difference is a half-micro-USD rounding case (exact value 3657.5 µUSD) where floating point lands one micro below the ledger's exact `Decimal` arithmetic. The ledger is the correct one.
+  - **Reasoning is billed as output:** the first version of that cross-check disagreed on five of six rows, and every gap was exactly the reasoning-token count multiplied by the output price — confirming the rule Step 1's research had only been able to infer.
+  - **Reprice:** 4,237 rows changed, `integrity_check` ok, rollups agreeing with the raw rows to the micro-dollar, and a second run reporting `rowsChanged: 0`.
+  - 290 tests (217 core + 27 CLI + 46 app) · lint clean · bundle signed · `make smoke` alive.
 
 ### Step 5 — Analytics popover + exports
 - [ ] Popover: balance card, today/7d/30d spend, cache-hit %, per-model breakdown, cache sparkline
@@ -267,3 +286,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 3 | Wave B2 (integration) + B3 (docs, independent review) merged. The review **blocked the gate** on two P1s: the low-balance alert was marked delivered before it was (cooldown consumed even when the post failed, no menu-bar fallback) and the Currency setting was a live control wired to nothing. Also found seven P2s and one stale claim in SECURITY.md. |
 | 2026-09-24 | 3 | Wave C (fixes) merged: 4 core fixes each with a test proven to fail without it, the P1 alert/fallback rework, the ticker re-evaluating staleness and login-item status, a queued refresh after import, banner clearing, the Keychain-problem diagnostic reaching app and CLI, and the real currency in the panel. Also keyed the key import end to end: `deeptally key import --shell zsh`, verified with the environment scrubbed. |
 | 2026-09-24 | 3 | Docs lane merged (USAGE/PRIVACY/ARCHITECTURE/README + a regenerated settings screenshot), plus two parent follow-ups the lanes could not do: `AppEnvironment` now actually wires `loadWithDiagnostics()`, and the reviewer-style inspection of that wiring found a defect of my own — a rejected user override suppressed the rate panel and its banner contradicted itself. Both fixed by separating "no table" from "override rejected" and cutting an NSError dump out of the user-facing sentence. |
+| 2026-09-24 | 4 | Ledger, importer watermark, aliases, reprice, CLI surface and menu-bar metrics all merged. The real-ledger finding (4,237 rows at $0) is recorded above with the before/after numbers. |
+| 2026-09-24 | 4 | **Orchestration error of mine:** I launched two lanes against the same CLI file in one wave, merged one of them, then merged two further lanes on top before noticing. The union had to be reconciled by a dedicated lane with both test suites as the contract. The docs lane caught it first by observing that the code its documentation described was absent from its base. Lesson recorded: two writers, one file, no arbitration point is a brief-level mistake, not a lane-level one. |
