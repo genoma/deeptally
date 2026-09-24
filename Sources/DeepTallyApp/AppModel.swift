@@ -59,7 +59,18 @@ final class AppModel {
   // MARK: - Private state
 
   private let environment: AppEnvironment
-  private let scheduler: UserNotificationScheduler
+  /// Injection seam: the notification centre. See ``LowBalanceAlerting``.
+  private let scheduler: any LowBalanceAlerting
+  /// Injection seam: the poll timer and the ticker. See ``AppScheduling``.
+  private let scheduling: any AppScheduling
+  /// Injection seam: the login item. See ``LoginItemControl``.
+  private let loginItem: LoginItemControl
+  /// Injection seam: the wall clock. The app reads `Date()`; a test moves it, so "stale after an
+  /// hour" and "the cooldown has elapsed" are assertions rather than waits.
+  private let now: @MainActor () -> Date
+  /// Injection seam: the fraction `PollingPlan` scales its additive jitter by. The app draws it from
+  /// system randomness; a test pins it to 0, which makes the recorded delay exactly the backoff.
+  private let jitterFraction: @MainActor () -> Double
 
   /// The last successful reading and when it arrived. Seeded from `UserDefaults` at launch so the
   /// popover has something true to show before the first fetch returns.
@@ -76,17 +87,30 @@ final class AppModel {
   /// Set when `refresh()` arrives while a request is in flight; the next run starts when the
   /// current one finishes, so no caller's refresh is silently dropped.
   private var needsRefreshAgain = false
-  private var pollTask: Task<Void, Never>?
-  private var tickerTask: Task<Void, Never>?
   private var wakeTask: Task<Void, Never>?
   private let pathMonitor = NWPathMonitor()
   /// `nil` until the first path update arrives, so the initial "we have a path" report is not mistaken
   /// for a network coming back.
   private var networkWasAvailable: Bool?
 
-  init(environment: AppEnvironment = AppEnvironment()) {
+  /// Every collaborator that leaves the process — the HTTP request, the notification centre, the two
+  /// timers, the login item, the clock — is injectable and defaults to the shipping implementation, so
+  /// the app still builds this with `AppModel()` and a test replaces only the seams its assertion is
+  /// about. Each seam is documented where it is declared.
+  init(
+    environment: AppEnvironment = AppEnvironment(),
+    scheduler: any LowBalanceAlerting = UserNotificationScheduler(),
+    scheduling: any AppScheduling = TaskAppScheduler(),
+    loginItem: LoginItemControl = .system,
+    now: @escaping @MainActor () -> Date = { Date() },
+    jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) }
+  ) {
     self.environment = environment
-    self.scheduler = UserNotificationScheduler()
+    self.scheduler = scheduler
+    self.scheduling = scheduling
+    self.loginItem = loginItem
+    self.now = now
+    self.jitterFraction = jitterFraction
     let settings = environment.settingsStore.load()
     self.settings = settings
     self.monitor = environment.balanceMonitor(lowBalanceThreshold: settings.lowBalanceThreshold)
@@ -97,14 +121,22 @@ final class AppModel {
   // MARK: - Lifecycle
 
   /// Launch sequence: adopt the persisted reading, render the rate, wire the observers, then fetch.
-  func start() {
+  ///
+  /// `observingSystemEvents` is `false` in tests: the wake notification stream and `NWPathMonitor`
+  /// are real macOS sources a unit test cannot drive deterministically — and a path monitor firing on
+  /// a network flap would start a refresh in the middle of an unrelated assertion. Everything else,
+  /// the key resolution, the persisted reading, the ticker and the fetch included, is the code the app
+  /// runs.
+  func start(observingSystemEvents: Bool = true) {
     refreshLoginItemStatus()
     _ = resolveKey()
     lastNotified = environment.launchState.loadLastNotified()
     seedFromStoredReading()
     updateRateNow()
-    installWakeObserver()
-    installNetworkObserver()
+    if observingSystemEvents {
+      installWakeObserver()
+      installNetworkObserver()
+    }
     startTicker()
     if settings.notificationsEnabled {
       Task { await requestNotificationPermission() }
@@ -114,8 +146,7 @@ final class AppModel {
 
   /// Releases the observers and the timers while AppKit tears the process down.
   func stop() {
-    pollTask?.cancel()
-    tickerTask?.cancel()
+    scheduling.cancel()
     wakeTask?.cancel()
     pathMonitor.cancel()
   }
@@ -139,8 +170,8 @@ final class AppModel {
 
     if let key = resolution.key {
       do {
-        let balance = try await environment.makeClient(key).balance()
-        record(balance: balance, at: Date())
+        let balance = try await environment.makeFetcher(key).balance()
+        record(balance: balance)
       } catch {
         // The plan backs off on failures, so an outage or a sleeping laptop does not become a
         // request storm. `describe` never includes the key.
@@ -166,8 +197,8 @@ final class AppModel {
 
   /// Everything derived from the last reading and the current settings, recomputed in one place so a
   /// settings change, a fresh reading and a launch seed cannot disagree.
-  private func evaluate(now: Date = Date()) {
-    let next = monitor.evaluate(balance: latestBalance, lastSuccess: lastSuccess, now: now)
+  private func evaluate() {
+    let next = monitor.evaluate(balance: latestBalance, lastSuccess: lastSuccess, now: now())
     // The ticker re-evaluates every 30 seconds; writing an unchanged value would invalidate every
     // observer for nothing.
     if next != balanceState { balanceState = next }
@@ -175,14 +206,15 @@ final class AppModel {
 
   /// One successful reading: in memory, on disk and in the derived state. `UserDefaults`, not the
   /// ledger: this is display state, and losing it only costs an "as of" line on the next launch.
-  private func record(balance: Balance, at now: Date) {
+  private func record(balance: Balance) {
+    let fetchedAt = now()
     latestBalance = balance
-    lastSuccess = now
+    lastSuccess = fetchedAt
     consecutiveFailures = 0
     refreshError = nil
     environment.launchState.saveReading(
-      LaunchStateStore.Reading(balance: balance, fetchedAt: now))
-    evaluate(now: now)
+      LaunchStateStore.Reading(balance: balance, fetchedAt: fetchedAt))
+    evaluate()
   }
 
   /// The persisted reading from an earlier run, so a relaunch shows the amount immediately and the
@@ -205,25 +237,21 @@ final class AppModel {
       rateNow = nil
       return
     }
-    rateNow = environment.rateNow.display(at: Date())
+    rateNow = environment.rateNow.display(at: now())
   }
 
   // MARK: - Scheduling
 
   /// Arms the next refresh from `PollingPlan`: the configured interval, doubled per consecutive
-  /// failure and capped, plus additive jitter so many installs do not poll in lockstep.
+  /// failure and capped, plus additive jitter so many installs do not poll in lockstep. The delay is
+  /// handed to ``AppScheduling``, which is where a test reads it back.
   private func scheduleNextRefresh() {
-    pollTask?.cancel()
     let plan = PollingPlan(interval: TimeInterval(settings.refreshIntervalMinutes) * 60)
-    let now = Date()
+    let instant = now()
     let next = plan.nextRefresh(
-      after: now, attempt: consecutiveFailures, jitterFraction: Double.random(in: 0...1))
-    let delay = max(1, next.timeIntervalSince(now))
-    pollTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(delay))
-      guard !Task.isCancelled else { return }
-      self?.refresh()
-    }
+      after: instant, attempt: consecutiveFailures, jitterFraction: jitterFraction())
+    let delay = max(1, next.timeIntervalSince(instant))
+    scheduling.scheduleRefresh(after: delay) { [weak self] in self?.refresh() }
   }
 
   /// A wake is the moment the schedule is definitely wrong: the machine was asleep through it, so
@@ -269,14 +297,7 @@ final class AppModel {
   }
 
   private func startTicker() {
-    tickerTask?.cancel()
-    tickerTask = Task { [weak self] in
-      while !Task.isCancelled {
-        try? await Task.sleep(for: .seconds(Self.tickerSeconds))
-        guard !Task.isCancelled else { return }
-        self?.tick()
-      }
-    }
+    scheduling.startTicker(every: TimeInterval(Self.tickerSeconds)) { [weak self] in self?.tick() }
   }
 
   // MARK: - Notifications
@@ -293,7 +314,7 @@ final class AppModel {
 
     guard
       notificationPolicy.shouldNotify(
-        isLow: state.isLow, isStale: state.isStale, lastNotified: lastNotified, now: Date())
+        isLow: state.isLow, isStale: state.isStale, lastNotified: lastNotified, now: now())
     else { return }
 
     let threshold = Self.amountText(
@@ -308,7 +329,7 @@ final class AppModel {
     let accepted = await scheduler.postLowBalance(amountText: amountText, threshold: threshold)
     alertAuthorization = await scheduler.authorization()
     guard accepted else { return }
-    let stamped = Date()
+    let stamped = now()
     lastNotified = stamped
     environment.launchState.saveLastNotified(stamped)
   }
@@ -430,9 +451,9 @@ final class AppModel {
     guard !isTranslocated else { return }
     do {
       if enabled {
-        try LoginItem.register()
+        try loginItem.register()
       } else {
-        try LoginItem.unregister()
+        try loginItem.unregister()
       }
       loginItemError = nil
     } catch {
@@ -445,7 +466,7 @@ final class AppModel {
   /// the user approves in System Settings while the app runs must clear "Waiting for approval…"
   /// without a relaunch.
   private func refreshLoginItemStatus() {
-    let status = LoginItem.status
+    let status = loginItem.status()
     if status != loginItemStatus { loginItemStatus = status }
   }
 

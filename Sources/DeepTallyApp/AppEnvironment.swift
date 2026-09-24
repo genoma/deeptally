@@ -41,18 +41,31 @@ struct AppEnvironment: Sendable {
   /// then misses the public holidays and over-reports peak hours on them.
   let holidayCalendarProblem: String?
 
-  /// One client per refresh, bound to the key that refresh resolved: a forgotten or re-imported key
+  /// One fetcher per refresh, bound to the key that refresh resolved: a forgotten or re-imported key
   /// takes effect on the next request instead of being captured at launch.
-  let makeClient: @Sendable (String) -> DeepSeekClient
+  ///
+  /// Injectable for the same reason as ``keySource``: the app layer's refresh behaviour has to be
+  /// provable without a request leaving the machine. A test supplies a stub here, which is also what
+  /// guarantees no app test can reach the network.
+  let makeFetcher: @Sendable (String) -> any BalanceFetching
 
+  /// `keySource` and `makeFetcher` are injectable because resolving a key and using it touch two
+  /// things a test must not depend on: the developer's real Keychain and the environment of the
+  /// process that happens to run the tests (a shell with `DEEPSEEK_API_KEY` exported would otherwise
+  /// change what the app layer resolves).
   init(
     defaults: UserDefaults = .standard,
     keychain: KeychainStore = KeychainStore(),
+    keySource: APIKeySource? = nil,
     priceLoader: PriceTableLoader = PriceTableLoader(),
+    makeFetcher: @escaping @Sendable (String) -> any BalanceFetching = { key in
+      DeepSeekClient(keyProvider: { key })
+    },
     timeZone: TimeZone = .current
   ) {
     self.keychain = keychain
-    self.keySource = APIKeySource(keychain: keychain)
+    self.keySource = keySource ?? APIKeySource(keychain: keychain)
+    self.makeFetcher = makeFetcher
     self.settingsStore = SettingsStore(defaults: defaults)
     self.launchState = LaunchStateStore(defaults: defaults)
 
@@ -95,7 +108,6 @@ struct AppEnvironment: Sendable {
     let engine = PeakOffPeakEngine(table: table, holidayCalendar: calendar)
     self.peakOffPeak = engine
     self.rateNow = RateNowPresenter(table: table, engine: engine, timeZone: timeZone)
-    self.makeClient = { key in DeepSeekClient(keyProvider: { key }) }
   }
 
   /// The balance monitor for one threshold. The stale-after window is app policy, the threshold is a

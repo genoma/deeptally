@@ -49,3 +49,20 @@ enum LoginItem {
       + "System Settings → General → Login Items."
   }
 }
+
+/// The login-item operations the app performs, as one injectable value.
+///
+/// `SMAppService` acts on the *calling* process, so a test that reached these directly would really
+/// register the test runner as a login item. Behind this seam the app's toggle — including what it
+/// does when the register call fails — is testable without that side effect.
+struct LoginItemControl: Sendable {
+  var status: @MainActor @Sendable () -> LoginItem.Status
+  var register: @MainActor @Sendable () throws -> Void
+  var unregister: @MainActor @Sendable () throws -> Void
+
+  /// The shipping value: `SMAppService.mainApp`, read and changed.
+  static let system = LoginItemControl(
+    status: { LoginItem.status },
+    register: { try LoginItem.register() },
+    unregister: { try LoginItem.unregister() })
+}
