@@ -14,7 +14,7 @@
 | # | Decision | Value | Reason |
 |---|---|---|---|
 | 1 | Distribution | GitHub Releases, **DMG, ad-hoc signed, not notarized** | No Apple Developer Program |
-| 2 | Apple Developer Program | **No** ($99/yr declined) | Consequence: no cask, no Sparkle, one Keychain prompt per update, "Open Anyway" docs required |
+| 2 | Apple Developer Program | **No** ($99/yr declined) | Consequence: no cask, no Sparkle, an **Open Anyway detour on every browser-downloaded update** (measured: the exception is per-build), "Open Anyway" docs required |
 | 3 | Platform | **macOS 15.0+**, arm64-only, 64-bit native | macOS 27 Golden Gate is Apple-silicon-only; 15+ ≈ 98% of tracked installs |
 | 4 | Stack | Swift 6.4 + SwiftPM, AppKit `NSStatusItem` + SwiftUI popover, system `libsqlite3` | No Xcode, no third-party deps |
 | 5 | License | **GPL-3.0-or-later** | User requirement; App Store is incompatible by design → GitHub distribution |
@@ -75,7 +75,10 @@ off-peak at exactly half. Model line-up/prices changed three times in 2026 → `
 **Distribution mechanics (verified on macOS 27)**
 - Gatekeeper gates on **quarantine**: browser downloads → blocked; `curl` downloads carry only `com.apple.provenance` → launch cleanly.
 - macOS 15+ removed the Control-click bypass → *System Settings → Privacy & Security → Open Anyway*.
-- Ad-hoc cdhash is content-derived → one Keychain re-authorization per app update.
+- Ad-hoc identity is content-derived: a rebuilt bundle has a different code hash, so a Gatekeeper exception
+  approved for one build does **not** carry over to the next (verified: `Killed: 9` after approving the
+  previous build) — but Keychain access is *not* affected (verified: no prompt across a rebuild, because the
+  item's default ACL is permissive).
 - Homebrew casks now require Gatekeeper-passing apps and `--no-quarantine` was removed → no cask; a **formula** for the CLI is allowed.
 - GitHub Actions: free arm64 `macos-26` runner with Xcode 26.x for public repos (CI is easier than local builds).
 
@@ -209,7 +212,7 @@ One writer per worktree; lanes branch from `develop` and merge back with `--no-f
 |---|---|---|
 | No usage-history API | Blind spots (other machines, web use, app closed) | Local ledger + CSV import + explicit "estimated" labelling |
 | Pricing/model churn | Wrong costs | Versioned JSON table + user override + live probe before releases |
-| Ad-hoc signing quirks | Keychain re-prompts, login-item/notification failures | Spikes S3–S5; graceful fallbacks; documented |
+| Ad-hoc signing quirks | Gatekeeper re-approval on every browser-downloaded update (**confirmed**) · login-item/notification failures (**disproved**: both work, see S3/S4) · Keychain re-prompts (**disproved**) | Spikes S1–S5 complete; findings written into `INSTALL.md`/`UNSIGNED.md`; `curl` install path is the friction-free route |
 | Gatekeeper friction | Install drop-off | `curl` install script (no quarantine) + screenshots for the DMG path |
 | opencode schema drift | Import breaks | Feature-detection + fixture tests + CLI `--json` escape hatch |
 | macOS 26/27 UI bugs | Silent app death | `NSStatusItem` instead of `MenuBarExtra`-only |

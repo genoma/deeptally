@@ -56,9 +56,10 @@ supported way through.
 
 Notes:
 
-- Gatekeeper remembers the app you approved. TODO (Step 2, spike S1): confirm whether that exception
-  survives an app update (the ad-hoc signature is content-derived, so it may not) and record the observed
-  behaviour.
+- Gatekeeper remembers the app you approved, **but only for that exact build**. Measured 2026-09-24: after
+  approving one build, the next build (different ad-hoc signature) was killed by the kernel until it was
+  approved too. Every browser-downloaded update therefore costs another System Settings trip — while the
+  `curl` install path avoids this, because it never quarantines the app. See [`UNSIGNED.md`](UNSIGNED.md).
 - Removing the quarantine attribute by hand works but skips the only check macOS performed — see
   [`UNSIGNED.md`](UNSIGNED.md).
 - On an MDM-managed Mac the block may not be bypassable at all; also covered in [`UNSIGNED.md`](UNSIGNED.md).

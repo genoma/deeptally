@@ -142,7 +142,10 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 1. `MenuBarExtra`-only accessory apps can be killed by a Control Center setting — hence `NSStatusItem`.
 2. `/bin/bash` is 3.2 while brew `bash` is 5.3 — scripts silently break on macOS defaults.
 3. No `actool` → commit a prebuilt `Resources/AppIcon.icns` built with `iconutil`; no `.xcassets`.
-4. Ad-hoc cdhash is content-derived → **one Keychain "Always Allow" prompt after each app update**.
+4. Ad-hoc identity is content-derived: a rebuilt bundle has a new code hash, so (a) a Gatekeeper exception
+   does **not** carry over to the next build — each browser-downloaded update needs Open Anyway again
+   (verified: `Killed: 9` after the previous build had been approved), and (b) Keychain is unaffected — an item
+   written by one build reads back silently in the next (verified), because the default item ACL is permissive.
 5. Quarantine is the Gatekeeper gate: browser downloads are blocked, `curl` downloads are not.
 6. App Translocation: launching a quarantined app from outside `/Applications` runs it from a random
    read-only path and breaks login items/Keychain. Always move it first; detect and warn in-app.

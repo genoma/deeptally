@@ -100,5 +100,13 @@ whether ad-hoc signed apps are permitted.
   Translocation.
 - A Gatekeeper block and a System Settings detour on first launch are expected; a `spctl` verdict of
   "rejected" is expected too, and means "not notarized", nothing more.
-- One "Always Allow" Keychain prompt per app update is expected; it is a consequence of the ad-hoc
-  signature, not of anything the app is doing wrong.
+- **No Keychain prompt per update.** Measured 2026-09-24: an item written by build 1 was read back silently by
+  build 2, whose ad-hoc signature has a different hash. The item uses the default keychain ACL, which is
+  permissive for the user's own session. That is what removes the friction — and it is also the trade-off:
+  any process running as you can read it without a dialog, exactly as it can read a key exported in a shell
+  rc file. A stricter, per-app ACL is a deliberate future option, not something this build does by accident.
+- **Every update needs the Gatekeeper detour again.** Measured the same day: after approving build 1, the
+  build-2 bundle with a different signature hash was killed by the kernel (`Killed: 9`) until it was approved
+  again. Gatekeeper exceptions are bound to the exact code identity, so a browser-downloaded update costs
+  another System Settings trip. Updating through the `curl` install script avoids this completely, because
+  that copy is never quarantined in the first place.

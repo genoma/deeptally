@@ -7,11 +7,11 @@ Status legend: ✅ observed · ⏳ waiting on a human · ⛔ not applicable yet
 
 | # | Spike | Question | Status | Result |
 |---|---|---|---|---|
-| S1 | Gatekeeper flow | What exactly does macOS 27 show for a quarantined, ad-hoc-signed DMG, and does the exception survive an app update? | ⏳ | pending |
+| S1 | Gatekeeper flow | What exactly does macOS 27 show for a quarantined, ad-hoc-signed DMG, and does the exception survive an app update? | ✅ | Quarantined copy: **killed by the kernel** (`Killed: 9`, exit 137) until approved; the same build without quarantine runs normally. After approval it ran from `/Applications` (log: `quarantined=true translocated=false hasEnvAPIKey=false`). A `0181` flag does **not** mean approved (disproved). **The exception is per-build:** the next build with a different code hash was killed again, so every browser-downloaded update costs a new approval. Dialog screenshots still pending. |
 | S2 | App Translocation | Does launching from outside `/Applications` run the app from a random read-only path, and does our detection catch it? | ⏳ | pending |
 | S3 | Login item under ad-hoc | Does `SMAppService.mainApp.register()` work for an ad-hoc-signed bundle, in `/Applications` and outside it? | ✅ | **Works.** From `dist/` (outside `/Applications`) `register()` returned status `enabled` immediately, with no approval prompt, and `unregister()` returned `notRegistered`. `SMAppService` is therefore the primary login-item path; a LaunchAgent fallback is only needed if a future macOS changes this. Observed 2026-09-24. |
-| S4 | Notifications under ad-hoc | Does `UNUserNotificationCenter` authorization work for an ad-hoc-signed bundle, and what happens when denied? | ⏳ | pending |
-| S5 | Keychain across a rebuild | Does an "Always Allow" Keychain item survive a rebuilt bundle (new cdhash, same bundle ID)? | ⏳ | Partial: store/read/delete all returned `errSecSuccess` with no prompt from the same binary. The cross-rebuild prompt behaviour needs one human click. |
+| S4 | Notifications under ad-hoc | Does `UNUserNotificationCenter` authorization work for an ad-hoc-signed bundle, and what happens when denied? | ✅ | **Works.** `--spike notifications` from the ad-hoc bundle raised the system prompt and returned `{"granted":true}` (observed 2026-09-24). Denial is still untested; the app degrades to a menu-bar badge, so a denial is not fatal. |
+| S5 | Keychain across a rebuild | Does an "Always Allow" Keychain item survive a rebuilt bundle (new cdhash, same bundle ID)? | ✅ | **No prompt, no friction.** Build 1 (`cdhash a7759218…`) created the item; build 2 (`cdhash 1370f937…`) read it back silently (`errSecSuccess`, value returned). `SecItemAdd` without an explicit ACL creates a permissive item, so ad-hoc updates do not break Keychain access. Trade-off documented in `UNSIGNED.md`: any process running as the user can read it without a dialog. |
 | S6 | `curl` vs quarantine | Does a `curl`-downloaded file carry `com.apple.quarantine`? | ✅ | Only `com.apple.provenance` is set; no quarantine, so no Gatekeeper dialog. Verified 2026-09-24. |
 | S7 | Live DeepSeek API | Which models exist, what does the balance response look like, which usage fields come back? | ✅ | `deepseek-flash` and `deepseek-v4-pro`; balance amounts are strings with no timestamp; usage carries `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` plus nested reasoning tokens. Verified 2026-09-24. |
 
@@ -42,10 +42,19 @@ marker file exists — the shipped app never creates it.
   `hasEnvAPIKey=false`, while launching the same binary from a terminal that exports `DEEPSEEK_API_KEY`
   recorded `true`. This is measured evidence for the Keychain-first design: the app cannot rely on
   `~/.zshrc` and must import the key once, then read it from the Keychain.
+- **Gatekeeper exceptions are per-build, so updates are the real friction — not the first install.**
+  Approving one build does not approve the next (measured). This makes the `curl` install path more than a
+  convenience: a script-installed update is never quarantined, so it never needs a System Settings trip.
 - **A locally built DMG carries no quarantine.** `make dmg` produces a DMG that installs silently, so it
   cannot reproduce what a downloader sees. `make dmg SIMULATE=1` sets
   `com.apple.quarantine=0081;<hex-timestamp>;Safari;` on the DMG — the same shape Safari writes — which is
   what makes the Gatekeeper spike meaningful.
+
+- **A quarantined bundle is killed, not merely warned about.** Direct execution of the quarantined
+  `/Applications/DeepTally.app` binary returned exit 137 (`Killed: 9`); the identical build in `dist/`,
+  with no quarantine attribute, ran normally. Nothing about this depends on the ad-hoc signature.
+- **The `0x0100` bit in the quarantine value is not an approval marker.** A copy showing
+  `0181;…;Safari;` was still blocked, so the flag cannot be used to detect "already approved".
 
 ## Findings that already changed the design
 
