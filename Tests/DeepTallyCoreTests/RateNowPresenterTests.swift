@@ -46,12 +46,13 @@ private let peakWindowsJSON = #"""
 /// break them.
 private func fixtureTable(
   models: [String] = [flashModelJSON, proModelJSON],
-  peakWindows: String = peakWindowsJSON
+  peakWindows: String = peakWindowsJSON,
+  currency: String = "USD"
 ) throws -> PriceTable {
   let json = """
     {
       "version": "test",
-      "currency": "USD",
+      "currency": "\(currency)",
       "effective_from": "2026-09-24",
       "off_peak_multiplier": "0.5",
       "peak_windows_utc": \(peakWindows),
@@ -273,6 +274,28 @@ struct RateNowCountdownTests {
 }
 
 // MARK: - Prices
+
+@Suite("Rate-now currency")
+struct RateNowCurrencyTests {
+  /// 2026-09-28 02:30Z is inside the first peak window, so a display always exists.
+  private func display(for table: PriceTable) throws -> RateNowDisplay {
+    let presenter = makePresenter(table: table, timeZone: try timeZone("UTC"))
+    return presenter.display(at: try instant("2026-09-28T02:30:00Z"))
+  }
+
+  @Test("the display carries the table's currency instead of assuming USD")
+  func currencyComesFromTheTable() throws {
+    #expect(try display(for: fixtureTable(currency: "CNY")).currency == "CNY")
+    #expect(try display(for: fixtureTable(currency: "CHF")).currency == "CHF")
+  }
+
+  @Test("the shipped table prices in USD")
+  func shippedTableCurrency() throws {
+    let table = try PriceTableLoader().loadBundled()
+    #expect(table.currency == "USD")
+    #expect(try display(for: table).currency == "USD")
+  }
+}
 
 @Suite("Rate-now prices")
 struct RateNowPriceTests {
