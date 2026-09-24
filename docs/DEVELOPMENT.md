@@ -18,19 +18,60 @@ The project has **zero third-party dependencies** and no sandbox; it links syste
 ## Make targets
 
 ```sh
-make help     # list the targets
-make build    # release build, arm64 (app + CLI)
-make test     # swift test
-make lint     # swift format lint --recursive Sources Tests
-make bundle   # assemble dist/DeepTally.app and ad-hoc sign it
-make run      # bundle and launch the app
-make verify   # build + test + lint + bundle + codesign --verify
-make clean    # remove .build and dist
+make help        # list the targets
+make build       # release build, arm64 (app + CLI)
+make test        # swift test
+make lint        # swift format lint --recursive Sources Tests
+make bundle      # assemble dist/DeepTally.app and ad-hoc sign it
+make run         # bundle and launch the app
+make dmg         # build dist/DeepTally-<version>.dmg (SIMULATE=1 fakes a browser download)
+make kill        # stop a running DeepTally instance
+make smoke       # launch the bundled app and fail if it does not stay alive
+make screenshots # render the real popover to dist/popover*.png
+make verify      # build + test + lint + bundle + codesign --verify
+make clean       # remove .build and dist
 ```
 
-`make verify` is the gate a PR has to pass. Planned in Step 6, and therefore not in the
-[`../Makefile`](../Makefile) yet: `install`, `uninstall`, `release-check`, and the `make dmg` target that
-AGENTS.md §4 describes (`Scripts/dmg.sh`).
+`make verify` is the gate a PR has to pass. Still planned in Step 6, and therefore not in the
+[`../Makefile`](../Makefile) yet: `make install`, `make uninstall` and `make release-check`.
+
+## Visual checks
+
+Two targets exist because a UI change is not reviewable from a passing test.
+
+**`make smoke`** bundles, kills any previous instance, launches the app and fails if the process is not alive
+four seconds later — then kills it again. It deliberately launches **without** a key, so it also covers "a
+missing key must not stop the app from starting".
+
+**`make screenshots`** renders the shipping views to `dist/popover.png`, `dist/popover-dark.png` and
+`dist/popover-settings.png` (the committed copies live in `docs/assets/`). Those come from the same binary,
+through the **real** composition root and the real key precedence:
+
+```sh
+make bundle
+dist/DeepTally.app/Contents/MacOS/DeepTally --spike render-popover dist/popover [height]
+```
+
+The optional `height` defaults to 420 pt, the real popover size; pass a taller value to capture the part of
+the body that scrolls. The command waits for a settled state before drawing, because a persisted reading
+would otherwise bake a permanent *"Refreshing…"* into the screenshot. It needs a key (Keychain or
+`DEEPSEEK_API_KEY`) to show an amount — which makes a successful run a live check that the Keychain import
+works.
+
+Two traps, both learned the hard way (2026-09-24):
+
+1. **Offscreen hosting has no window**, so it has no appearance and no material behind it. Without an
+   explicit `.environment(\.colorScheme, …)` **and** an explicit background, the render resolves
+   dark-on-nothing — white text on white. Every `writePNG` caller in `Spikes.swift` sets both.
+2. **Never write `#Preview`** in this repo. The macro expands through the `PreviewsMacros` plugin, which ships
+   with Xcode; with Command Line Tools the build fails with *"external macro implementation type
+   'PreviewsMacros.SwiftUIView' could not be found"* ([`../AGENTS.md`](../AGENTS.md) §9.13). Use a
+   `PreviewProvider` struct instead — it still renders in Xcode's canvas. `@State` (a `SwiftUIMacros` macro)
+   is unavailable to a CLT build for the same reason, which is why the previews use constant bindings.
+
+The other `--spike` commands (`identity`, `keychain-store`, `login-item-register`, `notifications`, …) are the
+Step 2 measurement tools. Protocol, commands and recorded output: [`SPIKES.md`](SPIKES.md). They exit before
+any UI exists and are not part of the shipped app path.
 
 ## Tests
 
@@ -65,6 +106,9 @@ search by default (Xcode installs it under `plugins/`). The test target passes
   dedupe.
 - Never print, log or commit secrets. The API key is masked as `sk-…1234` in any diagnostic; `launchctl
   setenv` is forbidden.
+- Money is a JSON **string** everywhere (`Decimal.parse`), and every monetary value comes from data, never
+  from Swift: prices and model IDs load from `Resources/PriceTable.json` ([`../AGENTS.md`](../AGENTS.md)
+  §9.11).
 
 ## Branches, commits, versions
 
@@ -83,7 +127,8 @@ MINOR version. The CHANGELOG ([`../CHANGELOG.md`](../CHANGELOG.md), Keep a Chang
 
 ## Where things live
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — targets, data flow, ledger schema, rate-now math.
+- [`USAGE.md`](USAGE.md) — the user's page: key import, the CLI, the popover and settings.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — targets, composition root, data flow, ledger schema, rate-now math.
 - [`PRIVACY.md`](PRIVACY.md) — hosts, stored data, deletion.
 - [`INSTALL.md`](INSTALL.md) / [`UNSIGNED.md`](UNSIGNED.md) — install paths and the signing trade-offs.
 - [`../SECURITY.md`](../SECURITY.md) — reporting and threat model.

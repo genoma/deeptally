@@ -46,13 +46,15 @@ Nothing is published yet — do not run a guessed URL.
 The old bypass — Control-click → Open — was removed in macOS 15, so the System Settings route above is the
 supported way through.
 
-<!-- SCREENSHOT PLACEHOLDERS (Step 2, spike S1): docs/assets/install-{block-dialog,privacy-security,
-     confirm-open}.png — the macOS 27 flow is captured in Step 2; dialog wording differs per release. -->
-> 📷 *Screenshot placeholder — the first-launch block dialog on macOS 27 (Step 2, spike S1).*
+<!-- SCREENSHOT PLACEHOLDERS (spike S1): docs/assets/install-{block-dialog,privacy-security,
+     confirm-open}.png are still MISSING. S1 recorded the outcome in text (kernel-killed until approved,
+     and the per-build exception), not the dialogs, and the wording differs per macOS release. Replace these
+     three placeholders and delete this comment after Step 7's fresh-machine install exercises the flow. -->
+> 📷 *Screenshot placeholder — the first-launch block dialog on macOS 27 (spike S1; not captured yet).*
 >
-> 📷 *Screenshot placeholder — System Settings → Privacy & Security with the "Open Anyway" button.*
+> 📷 *Screenshot placeholder — System Settings → Privacy & Security with the "Open Anyway" button (not captured yet).*
 >
-> 📷 *Screenshot placeholder — the final confirmation dialog after "Open Anyway".*
+> 📷 *Screenshot placeholder — the final confirmation dialog after "Open Anyway" (not captured yet).*
 
 Notes:
 
@@ -63,6 +65,7 @@ Notes:
 - Removing the quarantine attribute by hand works but skips the only check macOS performed — see
   [`UNSIGNED.md`](UNSIGNED.md).
 - On an MDM-managed Mac the block may not be bypassable at all; also covered in [`UNSIGNED.md`](UNSIGNED.md).
+- After the first launch, see [After installing](#after-installing) — the app has no key until you import one.
 
 ## Path 3 — from source
 
@@ -78,14 +81,43 @@ make run        # bundles dist/DeepTally.app and launches it
 ([`../Scripts/bundle.sh`](../Scripts/bundle.sh)). A bundle you built locally carries no quarantine attribute,
 so it launches without a Gatekeeper dialog.
 
+You can also build the DMG locally: `make dmg` produces `dist/DeepTally-<version>.dmg` — the app, an
+`/Applications` symlink and a README with the four first-launch steps. `make dmg SIMULATE=1` additionally sets
+the `com.apple.quarantine` attribute a browser download would, which is how the Gatekeeper flow is reproduced
+([`SPIKES.md`](SPIKES.md) S1).
+
 The CLI is built alongside the app and can be run directly:
 
 ```sh
 swift run deeptally balance     # prints the account balance
+swift run deeptally rate        # the peak/off-peak window now, no key needed
 ```
 
-Unlike the app, the CLI reads `DEEPSEEK_API_KEY` from the environment. The app will import the key into the
-Keychain instead (Step 3; until that lands, development builds fall back to the environment variable too).
+Both halves resolve the key the same way — **Keychain first, then `DEEPSEEK_API_KEY`** — so
+`swift run deeptally key import --shell zsh` stores it once and the CLI and the app then use the same key. The
+full command set, the exit codes and the settings are in [`USAGE.md`](USAGE.md).
+
+## After installing
+
+**1. Connect your API key.** Until you do, the popover says *"No API key yet. Import it from your login shell
+in Settings below."* Export `DEEPSEEK_API_KEY` in the file your login shell sources (`~/.zprofile` or
+`~/.zshrc` for zsh, `~/.bash_profile` or `~/.bashrc` for bash), then click the status item → **Settings** →
+**Import from shell** → **zsh** or **bash**. The key ends up in the macOS Keychain — never in a file or a
+preference. Why a GUI app cannot read your shell environment, and everything else the app does, is in
+[`USAGE.md`](USAGE.md).
+
+**2. Decide about launch at login.** **Startup → Launch at login** registers DeepTally through macOS
+`SMAppService` — no helper bundle, no LaunchAgent. The switch is disabled while the app runs from a temporary
+App Translocation copy, which is one more reason to install into `/Applications` before the first launch.
+
+**3. Every browser-downloaded update needs the Gatekeeper detour again.** Measured 2026-09-24: the exception
+is bound to the exact build, so after you approve build 1, build 2 — same bundle ID, different ad-hoc
+signature hash — is killed by the kernel (`Killed: 9`) until it is approved too. That is a *System Settings →
+Privacy & Security → Open Anyway* trip per update for the DMG path. The `curl` install path (Path 1) never
+quarantines the app, so it needs no detour ([`UNSIGNED.md`](UNSIGNED.md), [`SPIKES.md`](SPIKES.md) S1/S6).
+
+**4. Expect no Keychain prompt per update.** Measured: an item written by one build is read back silently by
+the next, because the default keychain ACL is permissive for your own session ([`UNSIGNED.md`](UNSIGNED.md)).
 
 ## Uninstalling
 
