@@ -33,6 +33,12 @@ if [ -f "Resources/AppIcon.icns" ]; then
   cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 fi
 
+# Menu bar template glyphs: loaded by name from Bundle.main. The Template suffix makes AppKit
+# treat them as template images (tinted by the system for light/dark menu bars).
+for png in Resources/MenuBarIconTemplate.png "Resources/MenuBarIconTemplate@2x.png"; do
+  [ -f "$png" ] && cp "$png" "$APP/Contents/Resources/"
+done
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

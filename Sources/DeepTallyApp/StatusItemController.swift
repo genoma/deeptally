@@ -18,6 +18,13 @@ final class StatusItemController {
     popover.contentViewController = NSHostingController(rootView: PopoverView(model: model))
 
     if let button = statusItem.button {
+      // Shipped template glyph, copied into Contents/Resources by Scripts/bundle.sh.
+      // The name ends in "Template", so AppKit tints it for light/dark menu bars.
+      if let glyph = NSImage(named: "MenuBarIconTemplate") {
+        glyph.isTemplate = true
+        button.image = glyph
+        button.imagePosition = .imageLeading
+      }
       button.title = model.menuBarLabel
       button.target = self
       button.action = #selector(togglePopover)
