@@ -36,9 +36,11 @@ What the design assumes:
 - **No sandbox.** The app is not sandboxed — App Store distribution is incompatible with GPL-3.0-or-later by
   design ([`docs/PLAN.md`](docs/PLAN.md) §1). It runs with your user privileges; there is no reason to ever
   run it as root.
-- **Local attacker.** Anything already running as your user can attempt to reach the Keychain item; macOS
-  prompts for consent (one prompt per app update — see [`docs/UNSIGNED.md`](docs/UNSIGNED.md)). Malware
-  running as you is outside what DeepTally can defend against.
+- **Local attacker.** Anything already running as your user can attempt to reach the Keychain item. Measured
+  on macOS 27 (docs/SPIKES.md S5): the item is created with the default access-control list, which is
+  permissive for your session — it reads back silently across rebuilds and does **not** prompt once per app
+  update. That is a deliberate trade-off: no prompt friction, in exchange for the same exposure as a key
+  exported in a shell rc file. Malware running as you is outside what DeepTally can defend against.
 - **Network attacker.** All requests are HTTPS to the two hosts listed in [`docs/PRIVACY.md`](docs/PRIVACY.md).
   DeepTally does not pin certificates and does not install a custom CA.
 - **MDM-managed Macs.** Management policy may refuse unsigned apps entirely. That is a deployment policy,
