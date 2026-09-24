@@ -382,9 +382,11 @@ struct LedgerRepriceTests {
           record(
             at: at, usage: millionMissTokens, costUSD: MicroUSD.decimal(correct),
             sessionID: "ses_ok"),
-          // A retired id that still carries a cost: repricing must not zero it.
+          // A model this table cannot price that still carries a cost: repricing must not zero it.
+          // Deliberately not a real DeepSeek id: an id the shipped table resolves by alias would make
+          // "unpriced" mean two different things here and in the real ledger.
           record(
-            at: at, model: "deepseek-v4-flash", usage: millionMissTokens,
+            at: at, model: "retired-unlisted-model", usage: millionMissTokens,
             costUSD: Decimal.parse("0.02"), sessionID: "ses_retired"),
         ], into: fixture.store) == 2)
 
@@ -395,7 +397,7 @@ struct LedgerRepriceTests {
     #expect(outcome.rowsUnpriced == 1)
     #expect(
       outcome.unpricedModels == [
-        UnpricedModel(model: "deepseek-v4-flash", rows: 1, spendUSD: Decimal.parse("0.02"))
+        UnpricedModel(model: "retired-unlisted-model", rows: 1, spendUSD: Decimal.parse("0.02"))
       ])
     #expect(try fixture.costs() == [correct, 20_000])
     #expect(outcome.spendBeforeUSD == outcome.spendAfterUSD)

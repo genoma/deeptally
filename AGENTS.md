@@ -180,6 +180,13 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
     render in Xcode's canvas. Do not "fix" this with `#if canImport(PreviewsMacros)`: `canImport` resolves
     importable modules, not macro plugin dylibs, so that condition is false on every toolchain and would just
     hide dead code.
+14. **Adding a case to a public error enum breaks every target that switches over it exhaustively.** The
+    compiler catches this, but only per-target, so a core-only lane sees a green build while the app and CLI
+    targets are red. `PricingDataError` is described in three separate switches (the core diagnostic, the
+    CLI's `describe`, the app's `describe`), so one new case cost three file edits across two lanes' ownership
+    in Step 4. Before adding a case: `rg 'case \.' --glob '*.swift' Sources | grep -B2 <EnumName>` and fix
+    every match in the same commit. The durable fix (collapsing the three into one user-facing sentence on the
+    error type) is scheduled as a follow-up rather than done piecemeal.
 
 ## 10. Definition of done
 

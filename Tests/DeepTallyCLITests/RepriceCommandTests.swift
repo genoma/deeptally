@@ -196,11 +196,11 @@ struct LedgerRepriceCommandTests {
     defer { ledger.destroy() }
     #expect(try CLI.unpricedWarning(ledgerURL: ledger.url) == nil)
 
-    try ledger.addRow(model: "deepseek-v4-flash-vision-exp", sessionID: "ses_unpriced")
+    try ledger.addRow(model: "deepseek-v9-not-in-the-table", sessionID: "ses_unpriced")
 
     let warning = try #require(try CLI.unpricedWarning(ledgerURL: ledger.url))
     #expect(warning.contains("1 of 1 ledger rows have no price"))
-    #expect(warning.contains("deepseek-v4-flash-vision-exp 1"))
+    #expect(warning.contains("deepseek-v9-not-in-the-table 1"))
     #expect(warning.contains("deeptally ledger reprice"))
   }
 
