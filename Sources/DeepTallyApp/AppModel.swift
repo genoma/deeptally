@@ -64,7 +64,7 @@ final class AppModel {
   /// The last successful reading and when it arrived. Seeded from `UserDefaults` at launch so the
   /// popover has something true to show before the first fetch returns.
   private var latestBalance: Balance?
-  private var lastSuccess: Date?
+  private(set) var lastSuccess: Date?
   private var consecutiveFailures = 0
   private var lastNotified: Date?
   private var refreshError: String?

@@ -30,6 +30,7 @@ enum Spikes {
     case "login-item-unregister": printJSON(unregisterLoginItem())
     case "notifications": requestNotifications()
     case "render-popover": renderPopover(arguments.dropFirst())
+    case "simulate-wake": simulateWake()
     default: printJSON(["error": "unknown spike command"])
     }
     exit(0)
@@ -74,8 +75,7 @@ enum Spikes {
       "lowBalanceThreshold": "\(model.settings.lowBalanceThreshold)",
       // The menu-bar fallback facts a PNG cannot show: the Step 3 review could not see the status
       // item at all, so the render now reports what the button would carry.
-      "menuBarTitle": menuBar.title,
-      "menuBarWarningGlyph": menuBar.showsLowBalanceWarning,
+      "menuBarTitle": menuBar.title, "menuBarWarningGlyph": menuBar.showsLowBalanceWarning,
       "menuBarTooltip": menuBar.tooltip ?? "",
       "notificationsEnabled": model.settings.notificationsEnabled,
       "alertsAvailable": model.alertAuthorization == .authorized,
@@ -119,6 +119,43 @@ enum Spikes {
   /// Offscreen hosting has no window, so it has no appearance and no material behind it: without an
   /// explicit colorScheme *and* background the content resolves dark-on-nothing and renders
   /// white-on-white (learned the hard way, 2026-09-24). Every caller sets both.
+  /// Proves the wake handler. It starts the model, waits for the first fetch, posts the same
+  /// notification macOS posts when the machine wakes, and reports whether another fetch followed.
+  ///
+  /// This exercises OUR handler; the delivery of that notification on a real lid-open remains macOS
+  /// behaviour and is not simulated here.
+  @MainActor
+  private static func simulateWake() -> Never {
+    let model = AppModel()
+    model.start()
+    let deadline = Date().addingTimeInterval(20)
+    while (model.balanceState == nil || model.isRefreshing) && Date() < deadline {
+      RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    }
+
+    let before = model.lastSuccess
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+
+    var refreshed = false
+    let wakeDeadline = Date().addingTimeInterval(15)
+    while Date() < wakeDeadline {
+      RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+      if let after = model.lastSuccess, after != before {
+        refreshed = true
+        break
+      }
+    }
+
+    printJSON([
+      "command": "simulate-wake",
+      "refreshedOnWake": refreshed,
+      "before": before.map { ISO8601DateFormatter().string(from: $0) } ?? "none",
+      "after": model.lastSuccess.map { ISO8601DateFormatter().string(from: $0) } ?? "none",
+      "balance": model.balanceState?.amountText ?? "none",
+    ])
+    exit(0)
+  }
+
   @MainActor
   private static func writePNG(_ view: AnyView, size: NSSize, to url: URL) {
     let hosting = NSHostingView(rootView: view)
