@@ -25,17 +25,35 @@ public struct KeychainStore: Sendable {
 
   /// Stores the secret, replacing any existing item.
   ///
+  /// Update-or-add rather than delete-then-add: `SecItemDelete` can legitimately fail (an item
+  /// created by a differently-signed build, a locked keychain, a policy denial) and its status used
+  /// to be ignored, so that failure resurfaced as a confusing `errSecDuplicateItem` from the
+  /// following add — observed 2026-09-24 when importing through the CLI over an item the app had
+  /// created. Updating first keeps the item's existing ACL and attributes, and any real failure now
+  /// reports its own status instead of being masked.
+  ///
   /// The secret is validated first and the trimmed form is what is stored, so a stray space or
   /// newline can never become part of a `Bearer` header.
   public func store(_ secret: String) throws {
     let value = try Self.validated(secret)
-    let query = baseQuery
-    SecItemDelete(query as CFDictionary)
-    var attributes = query
-    attributes[kSecValueData as String] = Data(value.utf8)
-    attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
-    let status = SecItemAdd(attributes as CFDictionary, nil)
-    guard status == errSecSuccess else { throw KeychainError.unexpectedStatus(status) }
+    let data = Data(value.utf8)
+
+    let updateStatus = SecItemUpdate(
+      baseQuery as CFDictionary,
+      [kSecValueData as String: data] as CFDictionary
+    )
+    switch updateStatus {
+    case errSecSuccess:
+      return
+    case errSecItemNotFound:
+      var attributes = baseQuery
+      attributes[kSecValueData as String] = data
+      attributes[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
+      let addStatus = SecItemAdd(attributes as CFDictionary, nil)
+      guard addStatus == errSecSuccess else { throw KeychainError.unexpectedStatus(addStatus) }
+    default:
+      throw KeychainError.unexpectedStatus(updateStatus)
+    }
   }
 
   /// The stored secret, or `nil` when no item exists.
