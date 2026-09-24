@@ -54,6 +54,27 @@ enum MicroUSD {
   }
 }
 
+/// What one ``LedgerStore/upsert(_:)`` did to the ledger's raw rows.
+///
+/// The three counts are disjoint and cover every offered row, which is what lets a caller say
+/// "0 new, 12 repaired, 5,263 unchanged" instead of one number that cannot tell a repair from a
+/// re-scan that changed nothing.
+public struct UpsertOutcome: Sendable, Equatable {
+  /// Rows the ledger did not have at all.
+  public let inserted: Int
+  /// Rows already stored whose counters differed from the offered record; their counters and the cost
+  /// that follows from them were rewritten.
+  public let updated: Int
+  /// Rows already stored exactly as offered; nothing was written for them.
+  public let unchanged: Int
+
+  public init(inserted: Int, updated: Int, unchanged: Int) {
+    self.inserted = inserted
+    self.updated = updated
+    self.unchanged = unchanged
+  }
+}
+
 /// The local usage ledger, in one SQLite file. DeepSeek publishes no historical usage API
 /// (docs/SPIKES.md S7), so this **is** the history: the popover, the CLI and the CSV export all read
 /// it, and nothing else keeps a copy. Which is why every write is idempotent — an import that runs
@@ -75,10 +96,12 @@ enum MicroUSD {
 /// day for every user east or west of UTC, which is the kind of bug that looks like a rounding error.
 ///
 /// ## Rollups and pruning
-/// `daily` is derived from `request` and is recomputed from it by
-/// ``rebuildDailyRollups()`` (and after every insert that stored something): for any UTC day with at
-/// least one `request` row, `daily` equals a direct aggregate over that day's rows. Days with no raw
-/// rows keep their last computed values, which is exactly what lets ``pruneRawRequests(olderThanDays:now:)``
+/// `daily` is derived from `request`: for any UTC day with at least one `request` row, `daily` equals
+/// a direct aggregate over that day's rows. ``rebuildDailyRollups()`` recomputes every day at once;
+/// ``insert(_:)`` and ``upsert(_:)`` recompute only the days their batch touched, because
+/// re-aggregating the whole history under the write lock is what would make a fifteen-minute import
+/// expensive. Either way a rebuilt day is computed by the same statement. Days with no raw rows keep
+/// their last computed values, which is exactly what lets ``pruneRawRequests(olderThanDays:now:)``
 /// drop old raw rows without losing the totals they contributed — so a prune always removes whole UTC
 /// days and never leaves a day half-aggregated. The trade-off is that raw-row range queries cannot
 /// see past the prune horizon; the rollups can.
@@ -261,7 +284,7 @@ public final class LedgerStore {
     return Int(raw) ?? 0
   }
 
-  // MARK: - Insert
+  // MARK: - Insert and upsert
 
   /// Stores `records`, skipping any whose `rawHash` is already present, and returns how many rows
   /// were actually written — so a re-import of unchanged source data returns `0`.
@@ -274,8 +297,11 @@ public final class LedgerStore {
   /// peak / off-peak window in force **at the record's own timestamp**, so an old record inserted
   /// today keeps the price it actually paid.
   ///
-  /// The affected UTC-day rollups are recomputed inside the same transaction, so a committed insert
-  /// never leaves `daily` behind `request`.
+  /// This path only ever adds; it never repairs a stored row. A source whose rows can be rewritten
+  /// under the same key wants ``upsert(_:)`` instead.
+  ///
+  /// The rollups for the UTC days this batch stored rows into are recomputed inside the same
+  /// transaction, so a committed insert never leaves `daily` behind `request`.
   public func insert(_ records: [UsageRecord], rawHash: (UsageRecord) -> String) throws -> Int {
     try insert(
       records.enumerated().map { index, record in
@@ -300,34 +326,111 @@ public final class LedgerStore {
       defer { _ = sqlite3_finalize(statement) }
 
       var inserted = 0
+      var storedDays: Set<Int64> = []
       for row in rows {
-        _ = sqlite3_reset(statement)
-        _ = sqlite3_clear_bindings(statement)
-        try bind(statement, 1, Self.epochSeconds(row.record.timestamp))
-        try bind(statement, 2, row.record.source.rawValue)
-        try bind(statement, 3, row.record.provider.rawValue)
-        try bind(statement, 4, row.record.model)
-        try bind(statement, 5, Int64(row.record.usage.cacheMissTokens))
-        try bind(statement, 6, Int64(Self.outputTokens(row.record.usage)))
-        try bind(statement, 7, Int64(row.record.usage.reasoningTokens))
-        try bind(statement, 8, Int64(row.record.usage.cacheHitTokens))
-        try bind(statement, 9, Int64(0))
-        try bind(statement, 10, MicroUSD.fromDecimal(row.record.costUSD))
-        try bind(statement, 11, row.record.sessionID)
-        try bind(statement, 12, row.rawHash)
-
-        let step = sqlite3_step(statement)
-        guard step == SQLITE_DONE else {
-          throw Self.error(step, context: "insert request", message: Self.errorMessage(database))
+        try insertRow(statement, row, counters: Self.storedCounters(for: row.record))
+        if sqlite3_changes(database) > 0 {
+          inserted += 1
+          storedDays.insert(Self.utcDayStart(row.record.timestamp))
         }
-        if sqlite3_changes(database) > 0 { inserted += 1 }
       }
-      if inserted > 0 { try rebuildDailyRollupsUnconditionally() }
+      if !storedDays.isEmpty { try rebuildDailyRollups(forDaysStartingAt: storedDays) }
       return inserted
     }
   }
 
-  /// `TokenUsage` → the `request` columns, and back, without losing a counter:
+  /// Reconciles offered rows with what the ledger already holds, keyed on `rawHash`.
+  ///
+  /// ``insert(_:)`` can only add, and that is not enough for a local source that rewrites its rows:
+  /// `raw_hash` is UNIQUE, so the newer copy of an existing row would be discarded, and a row imported
+  /// while its counters were still partial — opencode grows them as a completion streams — would keep
+  /// the partial counters *and* the partial cost forever. `upsert` closes that hole: when an offered
+  /// record's mapped counters differ from the stored row with the same key, that row's counters and
+  /// cost are rewritten, so a full rescan is a genuine repair instead of a silent no-op. An offered
+  /// record with the same counters writes nothing at all — not the timestamp, not the cost.
+  ///
+  /// A row whose counters match but whose stored cost is wrong is deliberately left alone:
+  /// ``reprice(costing:batchSize:)`` is the money repair, and an import that silently repriced history
+  /// whenever the price table changed would make "what did this import change?" unanswerable.
+  ///
+  /// Only the counters and the cost are ever rewritten. `ts`, `source`, `provider`, `model` and
+  /// `session_id` stay as first stored: `rawHash` identifies the source row, and the instant that row
+  /// is *about* does not move when its counters grow.
+  ///
+  /// The empty-key refusal is ``insert(_:)``'s: an empty `rawHash` is a bug that would disable dedupe,
+  /// so it throws ``LedgerError/emptyRawHash(row:)`` before anything is written. The rollups for the
+  /// UTC days the batch inserted or rewrote rows for are recomputed inside the same transaction.
+  public func upsert(_ rows: [(record: UsageRecord, rawHash: String)]) throws -> UpsertOutcome {
+    if let index = rows.firstIndex(where: { $0.rawHash.isEmpty }) {
+      throw LedgerError.emptyRawHash(row: index)
+    }
+    guard !rows.isEmpty else { return UpsertOutcome(inserted: 0, updated: 0, unchanged: 0) }
+
+    return try inTransaction {
+      let select = try prepare(Self.selectRequestByHashSQL, context: "select request by raw hash")
+      defer { _ = sqlite3_finalize(select) }
+      let insertStatement = try prepare(Self.insertRequestSQL, context: "insert request")
+      defer { _ = sqlite3_finalize(insertStatement) }
+      let update = try prepare(Self.updateRequestCountersSQL, context: "update request counters")
+      defer { _ = sqlite3_finalize(update) }
+
+      var inserted = 0
+      var updated = 0
+      var unchanged = 0
+      var touchedDays: Set<Int64> = []
+
+      for row in rows {
+        let counters = Self.storedCounters(for: row.record)
+        guard let stored = try storedRequest(select, rawHash: row.rawHash) else {
+          try insertRow(insertStatement, row, counters: counters)
+          inserted += 1
+          touchedDays.insert(Self.utcDayStart(row.record.timestamp))
+          continue
+        }
+        guard stored.counters != counters else {
+          unchanged += 1
+          continue
+        }
+        try updateCounters(
+          update, counters: counters, costMicroUSD: MicroUSD.fromDecimal(row.record.costUSD),
+          id: stored.id)
+        updated += 1
+        touchedDays.insert(
+          Self.utcDayStart(
+            Date(timeIntervalSince1970: TimeInterval(stored.timestampSeconds))))
+      }
+
+      if !touchedDays.isEmpty { try rebuildDailyRollups(forDaysStartingAt: touchedDays) }
+      return UpsertOutcome(inserted: inserted, updated: updated, unchanged: unchanged)
+    }
+  }
+
+  /// The five `request` counters a record maps to — the columns ``upsert(_:)`` compares to decide
+  /// whether a stored row needs repairing, and ``insert(_:)`` or ``upsert(_:)`` writes. Equatable, so
+  /// "did the counters change?" is one comparison.
+  ///
+  /// The cost is deliberately **not** part of the comparison. Cost is a function of counters, model
+  /// and instant; repairing a wrong price on unchanged counters is ``reprice(costing:batchSize:)``'s
+  /// job, not an import's. A resync that silently repriced history whenever the price table changed
+  /// would make "what did this import change?" unanswerable. A repair of changed counters still
+  /// writes the offered cost, because that cost is what the *new* counters are worth.
+  private struct StoredCounters: Equatable {
+    let input: Int64
+    let output: Int64
+    let reasoning: Int64
+    let cacheRead: Int64
+    let cacheWrite: Int64
+  }
+
+  /// One stored row as ``upsert(_:)`` needs to see it: its primary key, the whole-second instant it
+  /// counts into, and its counters.
+  private struct StoredRequest {
+    let id: Int64
+    let timestampSeconds: Int64
+    let counters: StoredCounters
+  }
+
+  /// `UsageRecord` → the stored counters, and back, without losing a counter:
   ///
   /// * `input = cacheMissTokens` and `cache_write = 0`. `TokenUsage` folds opencode's uncached input
   ///   and its cache writes into one miss count, and a cache write is never billed by DeepSeek, so
@@ -336,8 +439,93 @@ public final class LedgerStore {
   /// * `output = completionTokens - reasoningTokens`, `reasoning = reasoningTokens`, which is how
   ///   opencode stores them and how `CostEngine` bills them (reasoning is billed as output and is
   ///   already inside `completionTokens`; the two are recombined, never added twice).
+  private static func storedCounters(for record: UsageRecord) -> StoredCounters {
+    StoredCounters(
+      input: Int64(record.usage.cacheMissTokens),
+      output: Int64(outputTokens(record.usage)),
+      reasoning: Int64(record.usage.reasoningTokens),
+      cacheRead: Int64(record.usage.cacheHitTokens),
+      cacheWrite: 0
+    )
+  }
+
   private static func outputTokens(_ usage: TokenUsage) -> Int {
     max(0, usage.completionTokens - usage.reasoningTokens)
+  }
+
+  /// Writes one `insertRequestSQL` row. A duplicate key is ignored rather than fatal: the statement is
+  /// `INSERT OR IGNORE`, which makes a batch that repeats a key inside itself harmless.
+  private func insertRow(
+    _ statement: OpaquePointer,
+    _ row: (record: UsageRecord, rawHash: String),
+    counters: StoredCounters
+  ) throws {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, Self.epochSeconds(row.record.timestamp))
+    try bind(statement, 2, row.record.source.rawValue)
+    try bind(statement, 3, row.record.provider.rawValue)
+    try bind(statement, 4, row.record.model)
+    try bind(statement, 5, counters.input)
+    try bind(statement, 6, counters.output)
+    try bind(statement, 7, counters.reasoning)
+    try bind(statement, 8, counters.cacheRead)
+    try bind(statement, 9, counters.cacheWrite)
+    try bind(statement, 10, MicroUSD.fromDecimal(row.record.costUSD))
+    try bind(statement, 11, row.record.sessionID)
+    try bind(statement, 12, row.rawHash)
+
+    let step = sqlite3_step(statement)
+    guard step == SQLITE_DONE else {
+      throw Self.error(step, context: "insert request", message: Self.errorMessage(database))
+    }
+  }
+
+  /// The stored row for `rawHash`, or `nil` when the ledger does not have it. Reads through
+  /// `selectRequestByHashSQL`, which is an index lookup: `raw_hash` is UNIQUE.
+  private func storedRequest(_ statement: OpaquePointer, rawHash: String) throws -> StoredRequest? {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, rawHash)
+    let step = sqlite3_step(statement)
+    switch step {
+    case SQLITE_DONE:
+      return nil
+    case SQLITE_ROW:
+      return StoredRequest(
+        id: sqlite3_column_int64(statement, 0),
+        timestampSeconds: sqlite3_column_int64(statement, 1),
+        counters: StoredCounters(
+          input: sqlite3_column_int64(statement, 2),
+          output: sqlite3_column_int64(statement, 3),
+          reasoning: sqlite3_column_int64(statement, 4),
+          cacheRead: sqlite3_column_int64(statement, 5),
+          cacheWrite: sqlite3_column_int64(statement, 6)))
+    default:
+      throw Self.error(
+        step, context: "select request by raw hash", message: Self.errorMessage(database))
+    }
+  }
+
+  /// Rewrites one stored row's counters and cost. Only ever called for a row whose counters differ,
+  /// which is why the number of statements this runs is ``UpsertOutcome/updated``.
+  private func updateCounters(
+    _ statement: OpaquePointer, counters: StoredCounters, costMicroUSD: Int64, id: Int64
+  ) throws {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, counters.input)
+    try bind(statement, 2, counters.output)
+    try bind(statement, 3, counters.reasoning)
+    try bind(statement, 4, counters.cacheRead)
+    try bind(statement, 5, counters.cacheWrite)
+    try bind(statement, 6, costMicroUSD)
+    try bind(statement, 7, id)
+    let step = sqlite3_step(statement)
+    guard step == SQLITE_DONE else {
+      throw Self.error(
+        step, context: "update request counters", message: Self.errorMessage(database))
+    }
   }
 
   private static let insertRequestSQL = """
@@ -347,29 +535,93 @@ public final class LedgerStore {
     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
     """
 
+  private static let selectRequestByHashSQL = """
+    SELECT id, ts, input, output, reasoning, cache_read, cache_write
+      FROM request
+     WHERE raw_hash = ?1
+    """
+
+  private static let updateRequestCountersSQL = """
+    UPDATE request
+       SET input = ?1, output = ?2, reasoning = ?3, cache_read = ?4, cache_write = ?5,
+           cost_micro_usd = ?6
+     WHERE id = ?7
+    """
+
   // MARK: - Rollups
 
-  /// Recomputes `daily` from `request`. Idempotent: running it twice leaves identical rows.
+  /// Recomputes every `daily` row from every raw row. Idempotent: running it twice leaves identical
+  /// rows.
+  ///
+  /// This is the whole-table variant. ``insert(_:)`` and ``upsert(_:)`` know exactly which UTC days
+  /// their batch touched and use ``rebuildDailyRollups(forDaysStartingAt:)`` instead: re-aggregating
+  /// the entire history is the expensive part of a write, and the fifteen-minute import must not do it
+  /// under the write lock because one row arrived. A day rebuilt either way is computed by the same
+  /// statement, so the two differ in scope only, never in what a rebuilt day contains. Reprice keeps
+  /// this whole-table variant because a price change can rewrite rows anywhere in the table, so it
+  /// cannot name its days in advance.
   public func rebuildDailyRollups() throws {
     try inTransaction { try rebuildDailyRollupsUnconditionally() }
   }
 
-  /// Upserts one row per `(UTC date, provider, model)` present in `request`. Days that have no raw
-  /// rows are left alone on purpose: that is what keeps a pruned day's totals alive.
-  ///
-  /// The rollup has no `cache_write` column (the plan's sketch), which is not a loss today: records
-  /// built from `TokenUsage` fold cache writes into `input` and store 0 there, so the rollup's
-  /// prompt-side columns still add up. `request` stays the exact store.
+  /// Runs the whole-table rebuild. The caller owns the transaction.
   private func rebuildDailyRollupsUnconditionally() throws {
     try execute(Self.rebuildDailySQL)
   }
 
+  /// Recomputes the rollups for the given UTC days only: for each day start in `dayStarts`, one
+  /// aggregate over that day's raw rows, upserted into `daily`. Days outside the set are not read at
+  /// all. Days that have no raw rows keep their last computed values, which is what keeps a pruned
+  /// day's totals alive.
+  ///
+  /// The rollup has no `cache_write` column (the plan's sketch), which is not a loss today: records
+  /// built from `TokenUsage` fold cache writes into `input` and store 0 there, so the rollup's
+  /// prompt-side columns still add up. `request` stays the exact store.
+  private func rebuildDailyRollups(forDaysStartingAt dayStarts: Set<Int64>) throws {
+    let statement = try prepare(Self.rebuildDaySQL, context: "rebuild daily rollups")
+    defer { _ = sqlite3_finalize(statement) }
+    for dayStart in dayStarts.sorted() {
+      _ = sqlite3_reset(statement)
+      _ = sqlite3_clear_bindings(statement)
+      try bind(statement, 1, dayStart)
+      try bind(statement, 2, dayStart + 86_400)
+      let step = sqlite3_step(statement)
+      guard step == SQLITE_DONE else {
+        throw Self.error(
+          step, context: "rebuild daily rollups", message: Self.errorMessage(database))
+      }
+    }
+  }
+
+  /// Every day at once: for any UTC day with at least one `request` row, replaces that day's rollup
+  /// rows with a direct aggregate over them.
   private static let rebuildDailySQL = """
     INSERT INTO daily
       (date, provider, model, input, output, reasoning, cache_read, cost_micro_usd, request_count)
     SELECT date(ts, 'unixepoch'), provider, model, SUM(input), SUM(output), SUM(reasoning),
            SUM(cache_read), SUM(cost_micro_usd), COUNT(*)
       FROM request
+     GROUP BY date(ts, 'unixepoch'), provider, model
+    ON CONFLICT(date, provider, model) DO UPDATE SET
+      input = excluded.input,
+      output = excluded.output,
+      reasoning = excluded.reasoning,
+      cache_read = excluded.cache_read,
+      cost_micro_usd = excluded.cost_micro_usd,
+      request_count = excluded.request_count
+    """
+
+  /// One UTC day. `ts >= ?1 AND ts < ?2` partitions exactly the rows `date(ts, 'unixepoch')` would
+  /// label with that day, and it lets the boundary travel as an epoch second instead of a formatted
+  /// date. `?2` is exclusive, so a row at the next midnight belongs to the next day, half-open like
+  /// every other range in this store.
+  private static let rebuildDaySQL = """
+    INSERT INTO daily
+      (date, provider, model, input, output, reasoning, cache_read, cost_micro_usd, request_count)
+    SELECT date(ts, 'unixepoch'), provider, model, SUM(input), SUM(output), SUM(reasoning),
+           SUM(cache_read), SUM(cost_micro_usd), COUNT(*)
+      FROM request
+     WHERE ts >= ?1 AND ts < ?2
      GROUP BY date(ts, 'unixepoch'), provider, model
     ON CONFLICT(date, provider, model) DO UPDATE SET
       input = excluded.input,

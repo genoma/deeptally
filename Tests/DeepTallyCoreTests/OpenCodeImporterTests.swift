@@ -502,29 +502,31 @@ struct OpenCodeImporterTests {
         data: generationBMessage(
           modelID: "corrected", createdMilliseconds: 2_000, tokens: TokenSpec(input: 20))),
       type: "assistant")
-    // Identical counters here, but the divergence above applies the time_updated rule to all overlaps.
+    // Identical counters here, and here the session copy is the *fresher* one (5000 vs 100). It must
+    // not inherit the time_updated preference from the divergent overlap above: divergence is decided
+    // per overlap, so this group keeps the message row even though the session copy was written later.
     try fixture.insert(
       row(
         id: "msg_overlap2",
         sessionID: "ses_overlap2",
         created: 2_500,
-        updated: 5_000,
+        updated: 100,
         data: generationAMessage(
-          modelID: "newer-message", createdMilliseconds: 2_500, tokens: TokenSpec(input: 7))),
+          modelID: "older-message", createdMilliseconds: 2_500, tokens: TokenSpec(input: 7))),
       into: "message")
     try fixture.insertSessionMessage(
       row(
         id: "msg_overlap2",
         sessionID: "ses_overlap2",
         created: 2_500,
-        updated: 100,
+        updated: 5_000,
         data: generationBMessage(
-          modelID: "older-session", createdMilliseconds: 2_500, tokens: TokenSpec(input: 7))),
+          modelID: "fresher-session", createdMilliseconds: 2_500, tokens: TokenSpec(input: 7))),
       type: "assistant")
 
     let imported = try importer(for: fixture).importAll()
 
-    #expect(imported.map(\.record.model) == ["corrected", "newer-message"])
+    #expect(imported.map(\.record.model) == ["corrected", "older-message"])
     #expect(imported.map(\.record.usage.cacheMissTokens) == [20, 7])
   }
 
@@ -791,6 +793,87 @@ struct OpenCodeImporterIncrementalTests {
     // The full scan still sees both, so widening a watermark can always repair a scan.
     #expect(try importer.importAll().count == 2)
     #expect(try importer.importAll(since: nil).latestSeen == newest)
+  }
+
+  @Test(
+    "a row opencode touched after the watermark is offered again even though its created instant equals it"
+  )
+  func touchedRowIsReoffered() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createSessionMessageTable()
+
+    let created: Int64 = 1_787_800_000_000
+    // opencode's streaming pattern: the row is stored when the request starts and rewritten as tokens
+    // arrive. `time_created` stays put; only `time_updated` moves.
+    let updated = created + 4_000
+    try fixture.insertSessionMessage(
+      row(
+        id: "msg_streamed",
+        sessionID: "ses_streamed",
+        created: created,
+        updated: updated,
+        data: generationBMessage(
+          createdMilliseconds: created, tokens: TokenSpec(input: 100, output: 40))),
+      type: "assistant")
+
+    let watermark = Date(timeIntervalSince1970: TimeInterval(created) / 1_000)
+    let scan = try importer(for: fixture).importAll(since: watermark)
+
+    // The row is offered although its own created instant is not newer than the watermark...
+    #expect(scan.records.map(\.record.sessionID) == ["ses_streamed"])
+    // ...carrying the counters the rewrite left behind...
+    #expect(scan.records.first?.record.usage.cacheMissTokens == 100)
+    #expect(scan.records.first?.record.usage.completionTokens == 40)
+    // ...with the cost still anchored to `time_created`, not to `time_updated`.
+    #expect(scan.records.first?.record.timestamp == watermark)
+    // `latestSeen` is that instant too, so a touched row alone does not move the watermark.
+    #expect(scan.latestSeen == watermark)
+
+    // A watermark past both instants ends the re-offering, so the widened scan is not "everything".
+    let pastBoth = Date(timeIntervalSince1970: TimeInterval(updated) / 1_000 + 1)
+    #expect(try importer(for: fixture).importAll(since: pastBoth).records.isEmpty)
+  }
+
+  @Test("a touched copy re-offers an agreeing overlap, and the message row still wins it")
+  func touchedOverlapIsReoffered() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createMessageTable()
+    try fixture.createSessionMessageTable()
+
+    let created: Int64 = 1_787_800_000_000
+    let overlapTokens = TokenSpec(input: 100, output: 40, cacheRead: 20)
+    // The `message` copy carries the same counters and was not touched after the scan...
+    try fixture.insert(
+      row(
+        id: "msg_overlap",
+        sessionID: "ses_overlap",
+        created: created,
+        updated: created,
+        data: generationAMessage(
+          modelID: "message-copy", createdMilliseconds: created, tokens: overlapTokens)),
+      into: "message")
+    // ...while the `session_message` copy of the same source row was rewritten four seconds later.
+    try fixture.insertSessionMessage(
+      row(
+        id: "msg_overlap",
+        sessionID: "ses_overlap",
+        created: created,
+        updated: created + 4_000,
+        data: generationBMessage(
+          modelID: "session-copy", createdMilliseconds: created, tokens: overlapTokens)),
+      type: "assistant")
+
+    let watermark = Date(timeIntervalSince1970: TimeInterval(created) / 1_000)
+    let scan = try importer(for: fixture).importAll(since: watermark)
+
+    // Offered once — the union still merges the two generations into one row — and the memory of the
+    // touch does not change which copy wins, so an incremental scan offers the same record a full
+    // scan would.
+    #expect(scan.records.count == 1)
+    #expect(scan.records.first?.record.model == "message-copy")
+    #expect(scan.records.first?.record.usage.cacheMissTokens == 100)
   }
 
   @Test("a row deleted from the ledger is re-inserted by the next full scan, and only that row")

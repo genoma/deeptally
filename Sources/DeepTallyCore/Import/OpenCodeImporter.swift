@@ -73,14 +73,17 @@ public struct OpenCodeImporter {
     try scan(since: nil)
   }
 
-  /// Every row newer than `since`, plus the newest instant seen, so the caller can resume from there.
+  /// Every row worth offering since `since`, plus the newest instant seen, so the caller can resume
+  /// from there.
   ///
-  /// The watermark is what makes a 400 MB database cheap to re-read every fifteen minutes: rows at or
-  /// before `since` are filtered out by SQL (on opencode's millisecond `time_created`/`time_updated`
-  /// columns) and again in memory against the record's own timestamp, so the result is exactly the
-  /// rows a caller has not been offered before. `since == nil` scans everything.
+  /// The watermark is what makes a 400 MB database cheap to re-read every fifteen minutes: rows that
+  /// neither started nor were last touched after `since` are filtered out by SQL (on opencode's
+  /// millisecond `time_created`/`time_updated` columns) and again in memory, so the result is the
+  /// rows a caller has not been offered before — plus any row opencode has rewritten since the last
+  /// scan, whose counters may have grown (see ``reconsideredRawHashes(_:since:)``). `since == nil`
+  /// scans everything.
   ///
-  /// Passing a watermark *earlier* than the previous one is always safe — the ledger ignores rows it
+  /// Passing a watermark *earlier* than the previous one is always safe — the ledger absorbs rows it
   /// already has, keyed on `rawHash` — and is the way to recover a row that arrived with a timestamp
   /// at or before the old watermark, the one case a strict `>` cannot see. `latestSeen` is `nil` when
   /// the scan saw nothing; a caller keeps its previous watermark in that case.
@@ -102,7 +105,8 @@ public struct OpenCodeImporter {
 
     try execute(database, sql: "PRAGMA busy_timeout = 2000")
 
-    // Only used to narrow the read; the authoritative cutoff is `record.timestamp > since` below.
+    // Only used to narrow the read; the authoritative cutoff is `reconsideredRawHashes(_:since:)`
+    // below.
     let sinceMilliseconds = since.map { Int64(($0.timeIntervalSince1970 * 1_000).rounded(.down)) }
     let schema = try detectSchema(in: database)
     var candidates: [Candidate] = []
@@ -119,7 +123,44 @@ public struct OpenCodeImporter {
 
     let merged = merge(candidates)
     guard let since else { return merged }
-    return merged.filter { $0.record.timestamp > since }
+    let reconsidered = Self.reconsideredRawHashes(candidates, since: since)
+    return merged.filter { reconsidered.contains($0.rawHash) }
+  }
+
+  /// The authoritative watermark test, as the set of source rows it keeps.
+  ///
+  /// A `(id, session)` row is worth offering when **any** of its copies satisfies either:
+  ///
+  /// * the instant the record is *about* (`time.created`, which is when the request started) is newer
+  ///   than the watermark — the ordinary case; or
+  /// * opencode has rewritten the copy since (`time_updated` newer) — the streaming case. A completion
+  ///   stores its first copy while tokens are still arriving and grows the counters afterwards, so
+  ///   `time.created` can equal the watermark while `time_updated` is seconds later. On the
+  ///   developer's database every one of the 2,701 token-bearing `session_message` rows has
+  ///   `time_updated > time_created` by one to five seconds, so this half is the common one, not an
+  ///   edge case.
+  ///
+  /// Testing only the record's own instant — which this filter used to do — threw away exactly the
+  /// rows the SQL pre-filter widens itself to keep, so a row imported while its counters were partial
+  /// was never offered again. Re-offering a row is cheap: the ledger writes only what actually
+  /// differs (``LedgerStore/upsert(_:)``).
+  ///
+  /// The answer is a set of `rawHash`es rather than a filtered candidate list on purpose: the union
+  /// chooses between a row's generations with `time_updated` and the `message`-wins rule, and that
+  /// choice must not depend on the watermark, or an incremental scan and a full scan would offer
+  /// *different records* for the same source row and the ledger would rewrite the row on every tick.
+  /// The cost is recomputed from whichever record the merge chose, at that record's own instant.
+  private static func reconsideredRawHashes(
+    _ candidates: [Candidate], since: Date
+  ) -> Set<String> {
+    var keys: Set<String> = []
+    for candidate in candidates
+    where candidate.record.timestamp > since
+      || Date(timeIntervalSince1970: TimeInterval(candidate.timeUpdated) / 1_000) > since
+    {
+      keys.insert(candidate.rawHash)
+    }
+    return keys
   }
 
   // MARK: - Connection
@@ -247,8 +288,9 @@ public struct OpenCodeImporter {
     /// or after the cutoff, so a row written since the last scan — or one opencode has touched since
     /// — is always reconsidered. The timestamps inside `data` stay authoritative (`makeCandidate`
     /// prefers them whenever they are present), so this only narrows the read: the decision is the
-    /// in-memory `record.timestamp > since`. Both extra branches exist to avoid JSON-decoding a
-    /// 400 MB history every fifteen minutes, not to change which rows are imported.
+    /// in-memory ``reconsideredRawHashes(_:since:)``, which keeps a row whose created instant is
+    /// newer *or* whose `time_updated` is. This branch exists to avoid JSON-decoding a 400 MB history every
+    /// fifteen minutes, never to decide on its own which rows are offered.
     func sql(sinceMilliseconds: Int64?) -> String {
       let filter =
         sinceMilliseconds == nil ? "" : " WHERE time_created >= ?1 OR time_updated >= ?1"
@@ -383,9 +425,10 @@ public struct OpenCodeImporter {
 
   // MARK: - Union and dedupe
 
-  /// Unions both generations, deduped on `rawHash`. `message` rows are read first and win ties. If any
-  /// overlapping pair disagrees on the usage this importer maps, the merge instead prefers the row with
-  /// the greater `time_updated` (a rewritten row is more likely a correction than a duplicate).
+  /// Unions both generations, deduped on `rawHash`. `message` rows are read first and win ties. Within
+  /// an overlap that disagrees on the usage this importer maps, the merge instead prefers the row with
+  /// the greater `time_updated` (a rewritten row is more likely a correction than a duplicate);
+  /// overlaps that agree keep the `message` row even when the other copy is fresher.
   ///
   /// The derived `tokens.total` that only the `message` generation stores is deliberately not compared:
   /// on the developer's database 1635 of 1638 overlapping token-bearing rows differed only in that
@@ -400,16 +443,15 @@ public struct OpenCodeImporter {
       groups[candidate.rawHash, default: []].append(candidate)
     }
 
-    let hasDivergence = groups.values.contains { group in
-      guard let first = group.first, group.count > 1 else { return false }
-      return group.dropFirst().contains { $0.usage != first.usage }
-    }
-
     let merged: [ImportedRecord] = order.compactMap { key in
       guard let group = groups[key],
         let messageRow = group.first(where: { $0.isMessageGeneration }) ?? group.first
       else { return nil }
       var winner = messageRow
+      // Divergence is a property of one overlap group, not of the scan: a mismatch in one group must
+      // not change which copy wins in a group whose copies agree. The comparison is against the
+      // `message` row because that is the copy this merge prefers when they agree.
+      let hasDivergence = group.contains { $0.usage != messageRow.usage }
       if hasDivergence {
         for candidate in group where candidate.timeUpdated > winner.timeUpdated {
           winner = candidate
