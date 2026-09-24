@@ -49,14 +49,17 @@ through the **real** composition root and the real key precedence:
 
 ```sh
 make bundle
-dist/DeepTally.app/Contents/MacOS/DeepTally --spike render-popover dist/popover [height]
+dist/DeepTally.app/Contents/MacOS/DeepTally --spike render-popover dist/popover [height] \
+  [--ledger <path>] [--opencode <path>]
 ```
 
 The optional `height` defaults to 420 pt, the real popover size; pass a taller value to capture the part of
-the body that scrolls. The command waits for a settled state before drawing, because a persisted reading
-would otherwise bake a permanent *"Refreshing…"* into the screenshot. It needs a key (Keychain or
-`DEEPSEEK_API_KEY`) to show an amount — which makes a successful run a live check that the Keychain import
-works.
+the body that scrolls. `--ledger` and `--opencode` point the render at a throwaway store and database
+instead of the real ones, so a seeded metric can be rendered without writing into your own ledger — and the
+fail-soft path can be shown with a database that does not exist. The command waits for a settled state
+before drawing, because a persisted reading would otherwise bake a permanent *"Refreshing…"* into the
+screenshot. It needs a key (Keychain or `DEEPSEEK_API_KEY`) to show an amount — which makes a successful run
+a live check that the Keychain import works.
 
 Two traps, both learned the hard way (2026-09-24):
 
@@ -78,6 +81,32 @@ any UI exists and are not part of the shipped app path.
 Tests use **swift-testing** (`import Testing`, `@Suite`, `@Test`, `#expect`), not XCTest. Run them with
 `make test` or `swift test`. They must never touch the network and never open your real opencode database —
 inject clients, use fixture databases.
+
+There are three test targets, and any single one is a `--filter` away:
+
+```sh
+swift test                               # all three targets
+swift test --filter DeepTallyCoreTests   # core: ledger, pricing, importer, rate, settings, keychain
+swift test --filter DeepTallyCLITests    # the CLI: option parsers, local-day windows, usage report, reprice
+swift test --filter DeepTallyAppTests    # the app layer: AppModel, AppEnvironment, LocalUsageLedger
+```
+
+`--filter` matches `<test-target>.<test-case>`, so the target name alone selects the whole suite. The two
+executables (`DeepTallyApp`, `deeptally`) are linked into their test bundles in place — no library
+extraction — which is why the app's state owner and the CLI's command surface are asserted directly.
+
+**`swift build` does not compile test files.** It builds the products only, so a test that no longer compiles
+leaves `make build` green — and the same blind spot runs the other way: a green build is green for the
+targets it compiled, not for every target a change touches ([`../AGENTS.md`](../AGENTS.md) §9.14). Finish
+every change with `swift test` and read its real output.
+
+**Never commit a ledger.** The real one lives outside the repository
+(`~/Library/Application Support/DeepTally/ledger.sqlite`, plus `-wal`/`-shm` while it is open), and a CSV from
+`deeptally ledger export` carries session ids and dedupe hashes. Copying either into the tree — for a
+debugging session, a bug report or a fixture — puts real usage into git. If a test needs a ledger, let
+`LedgerStore(url:)` open one in a temporary directory; if it needs opencode rows, build a fixture database.
+`opencode.db` itself is never committed either. `.gitignore` covers `dist/` and `*.log` but not `*.sqlite` or
+`*.csv`, so check `git status` before you commit.
 
 Two platform traps are already handled in the build, but you will meet them the moment you touch
 `Package.swift` or add a target:

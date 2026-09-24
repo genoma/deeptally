@@ -1,15 +1,53 @@
 # Using DeepTally
 
-DeepTally is a menu bar app: a status item shows your DeepSeek **balance**, and clicking it opens a popover
-with the balance, the peak/off-peak rate in force right now, the login-item switch, every setting, and a way
-out. Everything it stores is on your Mac ([`PRIVACY.md`](PRIVACY.md)).
+DeepTally is a menu bar app: a status item shows one of three metrics, and clicking it opens a popover with
+the balance, the peak/off-peak rate in force right now, the login-item switch, every setting, and a way out.
+Everything it stores is on your Mac ([`PRIVACY.md`](PRIVACY.md)).
 
 ![The DeepTally popover](assets/popover.png)
 
 **Status: pre-alpha (development build `0.1.0`).** This page describes what the shipping code does after
-Step 3 — balance, menu bar, lifecycle. Spend, tokens and cache-hit rate need the ledger, which is Step 4
-([`PLAN.md`](PLAN.md) §5); where a feature does not exist yet, this page says so rather than describing an
-intention.
+Step 4 — balance, menu bar, the local usage ledger and the CLI. The analytics popover and CSV import are
+Step 5 ([`PLAN.md`](PLAN.md) §5); where a feature does not exist yet, this page says so rather than
+describing an intention.
+
+---
+
+## Where the numbers come from
+
+DeepTally shows three numbers, from two different sources.
+
+| Metric | Source | What it measures |
+|---|---|---|
+| **Balance** | `GET /user/balance` | The account's own figure, in the account's own currency, as of the last fetch. |
+| **Today's spend** | The local ledger | What the requests imported today cost, each priced with the peak/off-peak window it fell in. |
+| **Cache-hit rate** | The local ledger | Cache-read tokens ÷ prompt tokens over the **trailing 30 local days**. |
+
+**There is no historical usage API.** DeepSeek publishes a balance endpoint, per-response usage counters, and
+a manual monthly CSV export — nothing that answers "what did I spend last Tuesday" ([`PLAN.md`](PLAN.md)
+§3, [`SPIKES.md`](SPIKES.md) S7). So the history lives in a **local ledger**: one SQLite file at
+`~/Library/Application Support/DeepTally/ledger.sqlite`, shared by the app and the CLI.
+
+Rows get there by importing opencode's local database (`~/.local/share/opencode/opencode.db`) — read-only,
+and never its credential tables. **If you use opencode on this Mac, the app imports it for you**: once at
+launch, then every 15 minutes, on a fixed cadence with nothing to configure. `deeptally import` does the same
+on demand. If you do not use opencode there is nothing to import, which is a normal state rather than an
+error — the metrics stay em dashes and Settings says so ([`INSTALL.md`](INSTALL.md)).
+
+- **Each row is priced once, at import**, with the peak/off-peak window in force **at that row's own
+timestamp** — importing an old row today does not restate it at today's prices.
+- **The import is incremental.** The ledger remembers the newest instant it has already imported (a
+watermark), so a second run adds nothing. `deeptally import --full` rescans everything instead, which is the
+repair pass for a row whose timestamp arrived behind the watermark.
+- **"Today" means your local day**, not UTC. Every window is built from your calendar — the `usage` windows
+and the two ledger-backed metrics alike. The ledger also keeps UTC-keyed rollups, but that is a storage
+detail and no local-day figure is read out of them ([`ARCHITECTURE.md`](ARCHITECTURE.md)).
+- **The spend is an estimate.** The token counters are real, but the price applied to them comes from the
+versioned price table, and model line-ups and prices changed three times in 2026. DeepSeek's own billing is
+the only authoritative figure, and there is no API for it.
+
+What the ledger does **not** hold: prompt or completion text, request or response bodies, your API key, or
+anything from another machine. What it does hold, and how to remove it, is in [`PRIVACY.md`](PRIVACY.md).
 
 ---
 
@@ -81,12 +119,16 @@ The same engine, without the UI. Build it with `make build`, run it from a check
 `swift run deeptally <command>` (already in [`INSTALL.md`](INSTALL.md)), or use the binary shipped in Step 6.
 
 ```sh
-deeptally balance                      # the account balance
-deeptally rate                         # the peak/off-peak window in force, with prices
-deeptally key status                   # which store supplies the key, and any Keychain problem
+deeptally balance                        # the account balance
+deeptally rate                           # the peak/off-peak window in force, with prices
+deeptally usage [--json] [--days N]      # today, last 7 and last 30 days, then per model
+deeptally import [--full]                # import local opencode usage into the ledger
+deeptally ledger export <path.csv>       # write every raw ledger row as CSV
+deeptally ledger prune --days N          # delete raw rows older than N days (rollups kept)
+deeptally ledger reprice [--json]        # recompute stored costs with the current price table
+deeptally key status                     # which store supplies the key, and any Keychain problem
 deeptally key import [--shell zsh|bash]  # import from the login shell into the Keychain (default: zsh)
-deeptally key delete                   # remove the stored key
-deeptally usage [--json]               # usage summary — a stub until Step 4
+deeptally key delete                     # remove the stored key
 deeptally --version | --help
 ```
 
@@ -123,9 +165,176 @@ override per user — see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 Keychain read failed, and the key's shape (`shape: <n> chars, starts with sk-`) — never the key itself: the
 length is the only number it will tell you, and only the constant `sk-` prefix is ever echoed. It exits `0`
 whenever a key resolved, including a Keychain read that failed while `DEEPSEEK_API_KEY` supplied one, and
-`2` only when there is no key at all. `deeptally usage` is still the Step 3 stub: it prints
-`Usage summary lands in Step 4 (see docs/PLAN.md).`, or `{"status":"not_implemented","step":4}` with
-`--json`.
+`2` only when there is no key at all.
+
+### `deeptally usage`
+
+The whole ledger in one report: **today**, the **last 7 days** and the **last 30 days** — each a run of local
+days ending today — then a per-model breakdown for the `--days` window (default 30; `--days 1` is today).
+Needs no key. An empty ledger prints zeros and one hint instead of failing.
+
+The ledger examples in this section are literal output from a throwaway home directory (`CFFIXED_USER_HOME`
+pointed at a scratch folder, seeded with a small fixture database), so the ledger paths read `/tmp/…`; on
+your Mac the same command prints `~/Library/Application Support/DeepTally/ledger.sqlite`. Everything else —
+the columns, the arithmetic, the wording — is exactly what the command prints.
+
+```text
+$ deeptally usage
+Usage — local days (Europe/Rome), spend in USD.
+
+                  spend  requests  tokens  cache hit
+  today         $0.0006         2   4,610      66.7%
+  last 7 days   $0.0016         3   7,260      66.7%
+  last 30 days  $0.0017         4   8,260      66.7%
+
+per model, last 30 days:
+  provider  model                           spend  requests  tokens  cache hit
+  deepseek  deepseek-flash                $0.0001         1   1,000      66.7%
+  deepseek  deepseek-v4-flash             $0.0006         1   4,250      66.7%
+  deepseek  deepseek-v4-pro-0813          $0.0011         1   2,650      66.7%
+  kilo      deepseek-v9-not-in-the-table    $0.00         1     360      66.7%
+
+ledger: /tmp/deeptally-doc-home/Library/Application Support/DeepTally/ledger.sqlite — 5 raw rows
+```
+
+- **Tokens** is prompt + completion, where completion already includes reasoning (the ledger's own
+definitions, added rather than re-derived). **Cache hit** is cache reads ÷ prompt tokens, or `n/a` when the
+window held no prompt tokens — a ratio with no denominator is unknown, not 0%.
+- **Spend** is in the price table's currency (USD with the shipped table), not the account's, and is never
+converted. On screen it gets two decimals, plus up to two more when the amount needs them.
+- The header names the time zone the local days were computed in, and the last line names the ledger file and
+its raw row count.
+
+With `--json` the same numbers come as one document with stable key names: `schema`, `generated_at`,
+`timezone`, `currency`, `days`, `selected`, `windows[]` (`key`, `from`, `until`, plus the numbers) and
+`models[]`. Money is a decimal **string** (`"spend": "0.000577"`) so no float ever touches it, and
+`cache_hit_pct` is `null` — not 0 — when there is no denominator. Boundaries are ISO-8601 in the report's own
+time zone, offset included. With no rows at all, the report still answers:
+
+```text
+$ deeptally usage
+Usage — local days (Europe/Rome), spend in USD.
+
+                spend  requests  tokens  cache hit
+  today         $0.00         0       0        n/a
+  last 7 days   $0.00         0       0        n/a
+  last 30 days  $0.00         0       0        n/a
+
+No rows in the ledger yet — import local usage with `deeptally import`.
+
+ledger: /tmp/deeptally-doc-empty/Library/Application Support/DeepTally/ledger.sqlite — 0 raw rows
+```
+
+### `deeptally import`
+
+Reads opencode's database and adds what the ledger does not already have, pricing each row on the way in.
+Needs no key. A **missing opencode database is not an error**: the command prints one sentence and exits `0`.
+
+```text
+$ deeptally import
+warning: 1 offered row uses a model the price table does not list (deepseek-v9-not-in-the-table); they were recorded with a cost of 0.
+Imported 5 new rows of 5 offered (incremental scan).
+  watermark: 2026-09-24T22:51:26.000Z
+  ledger:    /tmp/deeptally-doc-home/Library/Application Support/DeepTally/ledger.sqlite
+$ deeptally import
+Imported 0 new rows of 0 offered (incremental scan).
+  nothing new: the ledger already holds every row opencode offered.
+  watermark: 2026-09-24T22:51:26.000Z
+  ledger:    /tmp/deeptally-doc-home/Library/Application Support/DeepTally/ledger.sqlite
+```
+
+(The warning goes to stderr, the report to stdout. Rows with no price are the subject of *Unpriced models*
+below.)
+
+`--full` rescans from the beginning instead of resuming at the watermark. It costs a full read of the
+database, and `raw_hash` uniqueness keeps it idempotent — it exists to pick up a row that arrived with a
+timestamp at or before the stored watermark, which the incremental scan cannot see:
+
+```text
+$ deeptally import --full
+Imported 1 new row of 5 offered (full resync).
+  watermark: 2026-09-24T22:51:26.000Z
+  ledger:    /tmp/deeptally-doc-home/Library/Application Support/DeepTally/ledger.sqlite
+```
+
+### `deeptally ledger export` and `prune`
+
+```text
+$ deeptally ledger export /tmp/doc-evidence/ledger.csv
+Exported 5 raw rows to /tmp/doc-evidence/ledger.csv.
+$ deeptally ledger prune --days 30
+Pruned 1 raw row older than 30 days; the daily rollups were kept.
+```
+
+`export` writes every raw row, oldest first, as CSV with the columns
+`ts,source,provider,model,input,output,reasoning,cache_read,cache_write,cost_usd,session_id,raw_hash`. CSV is
+an inspection and interchange format, never the primary store; the file round-trips back into a ledger
+(importing it is core functionality, not yet a CLI command).
+
+`prune --days N` deletes **raw rows** older than N days and keeps the `daily` rollups, so the totals those
+days contributed survive; the cutoff is floored to a UTC day so a day is never half-deleted. Nothing prunes
+by itself — the horizon is yours to choose, and `--days` is required. `deeptally ledger prune --days`
+without a value is a usage error (exit `1`), not a default horizon.
+
+`reprice` is the repair path for stored costs; see the next section.
+
+### Unpriced models: what the warning means, and the repair
+
+Model ids are resolved through the price table, **including its `aliases` list**: an id DeepSeek renamed keeps
+its price when the old id is listed as an alias of the current row, so a row imported under
+`deepseek-v4-flash` prices exactly like `deepseek-flash`. That is data in
+`Sources/DeepTallyCore/Resources/PriceTable.json`, not a Swift special case ([`ARCHITECTURE.md`](ARCHITECTURE.md)).
+
+An id the table does not know cannot be priced at all, and that is visible three ways:
+
+- `deeptally import` names it on **stderr**: `warning: 1 offered row uses a model the price table does not
+  list (…); they were recorded with a cost of 0.`
+- The row is still stored — its counters are real — with a **zero cost**. Zero is what "unknown price" looks
+  like in the ledger, and it is also what a genuinely free model would look like, which is why the warning
+  exists.
+- **Re-importing will never fix it**: the row is already there, deduplicated by `raw_hash`. `deeptally ledger
+  reprice` is the repair. It recomputes every stored row from its own model, counters and timestamp, writes
+  only the rows whose cost changes, and reports what it still cannot price:
+
+```text
+$ deeptally ledger reprice
+Repriced 5 rows with price table 2026-09-24 (USD); nothing changed.
+  spend before: 0.002321
+  spend after:  0.002321
+  unpriced:     1 rows the table does not price
+    deepseek-v9-not-in-the-table   1 rows  0.000000
+    Add those ids to the price table, then run `deeptally ledger reprice` again.
+```
+
+Fix the table — a new model entry, or the id as an alias — and run it again:
+
+```text
+$ deeptally ledger reprice
+Repriced 5 rows with price table 2026-09-24 (USD); 1 rows changed.
+  spend before: 0.002321
+  spend after:  0.002356
+  unpriced:     none
+```
+
+A third run is a no-op, and says so:
+
+```text
+$ deeptally ledger reprice
+Repriced 5 rows with price table 2026-09-24 (USD); nothing changed. The costs already came from this table.
+  spend before: 0.002356
+  spend after:  0.002356
+  unpriced:     none
+```
+
+`--json` prints the same report with numbers as numbers and money as six-decimal strings
+(`rowsExamined`, `rowsChanged`, `spendBefore`, `spendAfter`, `spendDelta`, `rowsUnpriced`,
+`unpricedModels[]`, `priceTableVersion`, `previousPriceTableVersion` — absent until the first reprice).
+
+**Why this matters, measured.** On this project's own ledger — real opencode usage, 5,275 rows — only one of
+six model ids matched the price table before aliases existed, so most rows were stored at 0. After the alias
+list was added, `deeptally ledger reprice` reported **5,275 rows, 4,237 changed, `$3.754373 → $14.378060`, 0
+rows unpriced**, with the integrity check clean and the rollups agreeing exactly; a second run changed
+nothing. The examples above are the same shape at fixture scale.
 
 **Exit codes** are contractual for scripts, and `--help` prints the same table: `0` success · `2` no usable
 key · `1` a usage error or any other failure. Two commands are worth spelling out: `key status` exits `0`
@@ -143,8 +352,23 @@ laid out top to bottom as follows.
 
 ### The menu bar title
 
-The status item shows the gauge glyph plus one metric. Today that is **Balance** — `$11.99`, or `—` before the
-first reading. The other two metrics exist in the picker but have no number behind them yet (Step 4).
+The status item shows the gauge glyph plus the metric you picked in **Settings → Menu bar**. All three have a
+number behind them:
+
+| Metric | Shows | Measured over |
+|---|---|---|
+| **Balance** (default) | The account amount, e.g. `$11.99`, or `—` before the first reading | The last `/user/balance` fetch |
+| **Today's spend** | The ledger's spend, e.g. `$0.42`, in the price table's currency | **Your local day**, from midnight to now |
+| **Cache-hit rate** | `62%`, or `—` when the window holds no prompt tokens | The **trailing 30 local days**, today included |
+
+The two ledger-backed figures are em dashes (`—`) until the first import pass finishes — never a fabricated
+zero. If opencode is absent or the ledger cannot be read, the settings panel adds one quiet line,
+*"Local usage is not being imported yet."*, and the balance keeps working; see
+[`INSTALL.md`](INSTALL.md).
+
+The spend label uses two decimals, exactly like the balance, so a day that cost less than half a cent reads
+`$0.00` even though the ledger knows the precise amount — `deeptally usage` prints up to four decimals in its
+table and the exact micro-USD string in `--json`.
 
 While the balance is below your threshold the gauge gives way to a warning triangle, and the button's
 tooltip names the amount — *"DeepSeek balance $1.42 is low."* That glyph is the fallback for a low balance
@@ -226,7 +450,7 @@ One compact line: the version from the bundle (`0.1.0` for a local `make bundle`
 |---|---|---|---|
 | **Refresh every** | stepper | 20 min | 5–240 minutes between balance refreshes. The wait doubles after each consecutive failure, capped at 1 hour, and up to 60 s of jitter is added so installs do not poll in lockstep. A refresh also runs on wake from sleep, when the network comes back, and whenever you press Refresh. |
 | **Low-balance threshold** | number field | 2 | Compared **strictly** with the account amount: `1.99 < 2` is low, `2.00` is not. Compared as reported — never converted. Valid range 0–1000. |
-| **Menu bar** | picker | Balance | Which metric the title shows. Only **Balance** has a value today; **Today's spend (Step 4)** and **Cache-hit rate (Step 4)** are listed but disabled, under the note *"Today's spend and cache-hit rate need the ledger (Step 4)."* |
+| **Menu bar** | picker | Balance | Which metric the title shows: **Balance**, **Today's spend** (your local day, in the price table's currency) or **Cache-hit rate** (cache reads ÷ prompt tokens over the last 30 local days; `—` when there is no denominator). The picker's tooltip names the two windows. If local usage is not being imported, a quiet line below says so and the picker stays usable. |
 | **Notify on low balance** | switch | on | A macOS notification when the balance falls below the threshold: *"DeepSeek balance is low"* / *"Balance $1.42 is below your $2.00 threshold."* macOS asks for permission once, at launch. An alert counts as sent only after macOS accepts it, so a denial or a failed post is retried instead of consuming the cooldown — and the **menu-bar warning glyph** (above) carries a low balance whenever macOS will not deliver the alert. While the switch is on and macOS reports the permission denied, the panel adds one line: *"macOS notifications are off for DeepTally, so low-balance alerts are not delivered. While the balance is low the menu bar shows a warning glyph; re-allow DeepTally in System Settings → Notifications to get the alert."* |
 | **Notify again after** | stepper | 12h | 15 min – 7 days (10 080 min) in 30-minute steps, shown as `12h`, `30 min`, `1h 30m`. A balance that stays low re-alerts at most once per cooldown, and the time of the last **delivered** alert survives a relaunch. Only a low balance triggers an alert; an old reading neither triggers nor silences one. The stepper is disabled while **Notify on low balance** is off. |
 | **Import from shell** | zsh / bash buttons | — | The one-time Keychain import (above). |
@@ -266,7 +490,8 @@ There is no one-step uninstaller yet: quitting, turning off **Launch at login**,
 | No low-balance notifications | macOS asks for permission once, at launch, when the switch is on. If it was denied, the switch keeps its state and the app keeps working: the fallback is the **menu-bar warning glyph** — while the balance is low the gauge is replaced by a warning triangle whose tooltip names the amount — and Settings states once that alerts are not delivered. Re-allow DeepTally in **System Settings → Notifications** to get the notification too. An alert macOS refused is retried, because only an accepted one counts as sent. |
 | *"Pricing data problem: …"* / *"Holiday data problem: …"* | The bundled price table (`Sources/DeepTallyCore/Resources/PriceTable.json`) or the holiday list (`Sources/DeepTallyCore/Resources/ChinaHolidays.json`) could not be read. Prices are data, so the app suppresses the rate panel instead of inventing numbers. Your override at `~/.config/deeptally/PriceTable.json` is different: it wins when it is valid, and an invalid override is ignored in favour of the bundled table rather than suppressing prices. |
 | The rate looks wrong on a holiday | The shipped calendar holds the official 2026 Chinese State Council dates; other years are not included. Extra dates can be merged in through the `holidays` array of your `~/.config/deeptally/PriceTable.json`. |
-| What does *"estimated"* mean? | Nothing in the app is labelled *estimated* today: the only number shown is your account balance, which comes straight from `GET /user/balance`. Later, spend computed locally by `CostEngine` from token counters and the price table will be an estimate (DeepSeek has no historical usage API — [`PLAN.md`](PLAN.md) §7), and per-request cost claims imported from a gateway provider (kilo/openrouter) will be labelled **estimated** because DeepTally cannot check them against DeepSeek's billing. TODO (Steps 4–5): the exact wording is frozen when the ledger and the analytics views land. |
+| What does *"estimated"* mean? | Every spend figure in the ledger is an **estimate**: the token counters come from opencode, and the price is computed locally from the versioned price table with the peak/off-peak windows. Model line-ups and prices changed three times in 2026, and no local ledger can see another machine, the web dashboard, or opencode usage that was never recorded. DeepSeek's own billing is the only authoritative figure, and there is no API for it. The balance is not an estimate — it comes straight from `GET /user/balance`. |
+| *"Today's spend"* or *"Cache-hit rate"* shows an em dash (`—`) | No ledger pass has read anything yet, or local usage is not being imported. Settings carries the quiet line *"Local usage is not being imported yet."* when that is why. A missing opencode database is the common cause and is normal; otherwise check `deeptally import` for the real diagnostic. |
 
 ---
 
