@@ -54,6 +54,9 @@ final class AppModel {
   /// Why the last ledger pass could not import, or `nil` when it did. Rendered only as the quiet
   /// note in ``localUsageNote``; a missing opencode database is never a banner.
   private(set) var localUsageProblem: String?
+  /// One calm sentence from the last pass about rows the price table cannot price, or `nil` when
+  /// every offered row had a price. Not a failure: the metrics still carry the priced rows' values.
+  private(set) var localUsagePricingNote: String?
 
   /// Written by `SettingsPanel` through `@Bindable`; every write is validated, persisted and acted
   /// on in ``settingsDidChange(from:)``.
@@ -568,6 +571,7 @@ final class AppModel {
       guard let self else { return }
       self.isLocalUsageRefreshing = false
       self.localUsageProblem = outcome.importProblem
+      self.localUsagePricingNote = outcome.pricingNote
       // A failed pass keeps the last good numbers: blanking them would turn a transient unreadable
       // file into "you spent nothing".
       if let metrics = outcome.metrics { self.localUsage = metrics }
@@ -599,11 +603,13 @@ final class AppModel {
     MetricFormatting.cacheHitPercent(localUsage?.cacheHitRatio)
   }
 
-  /// The one line the settings panel shows while local usage is not being imported. Quiet on
-  /// purpose: a missing opencode database or an unwritable ledger is not something the user has to
-  /// fix for the balance, the alerts or the rate panel to keep working.
+  /// The one line the settings panel shows while local usage needs a caveat: not being imported at
+  /// all, or being imported with some rows the price table cannot price. Quiet on purpose: neither a
+  /// missing opencode database nor an unpriced model is something the user has to fix for the
+  /// balance, the alerts or the rate panel to keep working.
   var localUsageNote: String? {
-    localUsageProblem == nil ? nil : "Local usage is not being imported yet."
+    if localUsageProblem != nil { return "Local usage is not being imported yet." }
+    return localUsagePricingNote
   }
 
   /// Everything the status item's button shows, derived in one place so the menu bar and

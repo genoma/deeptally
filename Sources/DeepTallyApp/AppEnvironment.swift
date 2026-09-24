@@ -171,7 +171,8 @@ struct AppEnvironment: Sendable {
   /// Built here so neither the model nor a view knows how any of those three is assembled, and so
   /// "no usable price table" turns into "no import" once, in one place.
   func makeLocalUsageLedger() -> LocalUsageLedger {
-    LocalUsageLedger(ledgerURL: ledgerURL, makeSource: makeUsageSource)
+    LocalUsageLedger(
+      ledgerURL: ledgerURL, priceTable: priceTable, makeSource: makeUsageSource)
   }
 
   // MARK: - Diagnostics
