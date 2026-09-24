@@ -16,9 +16,10 @@ first of them today:
 As with any HTTPS request, the host sees your IP address and the time of the request. DeepTally adds no
 identifiers, and there is no other host: no analytics endpoint, no error-reporting endpoint, no CDN.
 
-The optional usage-capture proxy (deferred to v1.1, opt-in) binds `127.0.0.1` only, so it is reachable from
-your Mac and nowhere else. It records counters, timestamps and model names for the requests that pass
-through it, and discards request and response bodies immediately.
+The optional usage-capture proxy is **deferred to v1.1 and does not exist in any current build** — nothing
+listens on a port today. When it lands it will be opt-in and bind `127.0.0.1` only, so it is reachable from
+your Mac and nowhere else; it will record counters, timestamps and model names for the requests that pass
+through it, and discard request and response bodies immediately.
 
 ## API key
 
@@ -39,8 +40,8 @@ through it, and discards request and response bodies immediately.
 
 ## The opencode database
 
-If you use opencode, DeepTally will import usage from `~/.local/share/opencode/opencode.db` (the importer
-exists; Step 4 wires it into the ledger). That import is:
+If you use opencode, DeepTally imports usage from `~/.local/share/opencode/opencode.db` — the app at launch
+and then every 15 minutes, or on demand with `deeptally import` ([`USAGE.md`](USAGE.md)). That import is:
 
 - **read-only**;
 - limited to the `message` **and** `session_message` tables — opencode ships two live schema generations
@@ -49,13 +50,15 @@ exists; Step 4 wires it into the ledger). That import is:
   plaintext (a SQLite authorizer denies those reads at the connection level).
 
 Only token counters, timestamps, model/provider names and cost fields are read. Message content is not
-extracted, stored or transmitted.
+extracted, stored or transmitted. The one identifier the import keeps is opencode's opaque `session_id`,
+which groups the requests of one session and says nothing about what was asked; deduplication uses a
+SHA-256 hash of the source row's identity (`source`, id, `session_id`), not its content.
 
 ## What is stored on disk
 
 | What | Where | Notes |
 |---|---|---|
-| Usage ledger | `~/Library/Application Support/DeepTally/` (SQLite) | Counters, timestamps, model names and estimated costs. No prompt or completion text. Step 4. |
+| Usage ledger | `~/Library/Application Support/DeepTally/ledger.sqlite` (SQLite; `-wal` and `-shm` side files while it is open) | One row per imported request: token counters (prompt / cache-read / cache-miss / completion / reasoning), the instant, `source`, `provider`, model id, the estimated cost, the opaque opencode `session_id` and the dedupe `raw_hash`. A `daily` rollup and a `meta` table (schema version, import watermark, last price-table version) live in the same file. No prompt or completion text, ever. |
 | Settings | `~/Library/Preferences/io.github.genoma.deeptally.plist` (`UserDefaults`), key `io.github.genoma.deeptally.settings` | One JSON blob: refresh cadence, low-balance threshold, menu bar metric, notifications on/off and the notification cooldown. It also carries `showSecondaryMetric`, an unused flag that no build reads. No currency is stored: the account currency is shown exactly as the API reports it. |
 | Last balance reading | Same plist, key `io.github.genoma.deeptally.last-reading` | The last successful `/user/balance` answer — amounts, currency, availability flag — plus the instant it was fetched. It exists so a relaunch can show the amount immediately with a truthful "as of" age instead of an empty panel. |
 | Last low-balance alert | Same plist, key `io.github.genoma.deeptally.last-notified` | A timestamp, written only after macOS accepted the alert, so the cooldown survives a relaunch — while a denied or failed post is retried instead of being recorded as delivered. |
@@ -70,17 +73,29 @@ the Keychain, and nowhere else.
 
 Two things worth stating plainly:
 
-- All spend figures are **local estimates**. DeepSeek has no historical usage API, and the ledger cannot
-  see usage from other machines, from the web dashboard, or from periods when DeepTally was not running
+- All spend figures are **local estimates**. DeepSeek has no historical usage API, and the ledger cannot see
+  usage from other machines, from the web dashboard, or anything opencode itself did not record. It does
+  catch up on rows that were recorded while DeepTally was closed: the next import reads them
   ([`PLAN.md`](PLAN.md) §7). That is a capability limit, not a data-collection one.
 - Peak/off-peak classification needs a holiday calendar; it ships as a data file
   (`Sources/DeepTallyCore/Resources/ChinaHolidays.json`) instead of being fetched from a third-party API.
 
-## Export and delete
+## Retention, export and delete
 
-**Export.** CSV export is planned in Step 5 ([`PLAN.md`](PLAN.md)) and will contain ledger rows only:
-counters, model names, timestamps and cost estimates. It never contains the API key. TODO (Step 5): the
-exact menu and CLI command are frozen with that step; until then there is no supported export.
+**Retention.** Nothing is pruned automatically — raw rows stay in `ledger.sqlite` until you prune them. (The
+plan's 400-day policy, [`PLAN.md`](PLAN.md) §4, is not wired in yet; the horizon is yours to choose.)
+Pruning is one command:
+
+```sh
+deeptally ledger prune --days 400     # delete raw rows older than 400 days
+```
+
+A prune deletes **raw rows** only, cut at a UTC day boundary so a day is never half-deleted, and keeps the
+`daily` rollups — so long-range totals survive after the rows behind them are gone.
+
+**Export.** `deeptally ledger export <path.csv>` writes every raw row: counters, model ids, timestamps,
+estimated costs, the opaque session ids and the dedupe hashes. The API key is not in the ledger and therefore
+also not in the export; there is nothing to redact. Treat the file as you would the ledger itself.
 
 **Delete everything.**
 
@@ -92,7 +107,7 @@ exact menu and CLI command are frozen with that step; until then there is no sup
 3. Until that lands, remove it by hand:
 
 ```sh
-rm -rf "$HOME/Library/Application Support/DeepTally"   # Step 2 logs today; the ledger from Step 4 on
+rm -rf "$HOME/Library/Application Support/DeepTally"   # the ledger and any Step 2 spike logs
 defaults delete io.github.genoma.deeptally              # all three keys above
 rm -rf "$HOME/Library/Caches/io.github.genoma.deeptally"
 ```

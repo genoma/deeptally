@@ -2,22 +2,29 @@
 
 **DeepSeek usage meter for the macOS menu bar.** Balance, spend, tokens and cache-hit rate — at a glance, locally.
 
-> **Status: pre-alpha.** Step 3 is done — the menu bar app shows the live balance, the current rate window and
-> the settings. Token usage, spend and cache-hit rate need the ledger, which is Step 4 in
-> [`docs/PLAN.md`](docs/PLAN.md).
+> **Status: pre-alpha.** Step 4 is done — the menu bar shows the live balance plus two ledger-backed metrics
+> (today's spend and the cache-hit rate), the app imports local opencode usage into its own SQLite ledger,
+> and the CLI can import, summarise, export, prune and reprice. The analytics popover and CSV import are
+> Step 5 in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## What it does
 
 - Shows your DeepSeek account balance in the menu bar, with an explicit "as of" timestamp
+- Switches the menu bar between **balance**, **today's spend** and the **cache-hit rate** (cache reads over
+  prompt tokens for the trailing 30 local days)
+- Keeps a **local usage ledger** — imported from opencode's database (read-only), each row priced with the
+  peak / off-peak window that was in force at the row's own timestamp
 - Tells you whether you are in a **peak or off-peak window right now** — in your local time — with a countdown
   to the next switch and the effective price for each model in that window, in the price table's own currency
 - Alerts when the balance drops below a threshold you set — and while macOS will not deliver the alert, a
   warning glyph stands in for the menu bar gauge
 - Starts at login, lives in the menu bar, no Dock icon
-- Ships a small CLI (`deeptally balance`, `deeptally rate`, `deeptally key …`) for scripts and terminals
+- Ships a small CLI (`deeptally usage`, `deeptally import`, `deeptally ledger …`, `deeptally balance`,
+  `deeptally rate`, `deeptally key …`) for scripts and terminals
 
-The ledger is still landing (Steps 4–5): token usage, spend and **cache-hit rate** tallied from the requests
-made on your Mac, with per-model cost estimates that include the peak / off-peak pricing windows.
+Spend is computed locally from real token counters and the versioned price table, so every ledger figure is an
+**estimate** — DeepSeek has no historical usage API ([`docs/PLAN.md`](docs/PLAN.md) §3). The balance is not an
+estimate: it comes straight from `GET /user/balance`.
 
 How to connect your API key, what each popover section shows and every setting are documented in
 [`docs/USAGE.md`](docs/USAGE.md).
@@ -39,10 +46,14 @@ install script that avoids the Gatekeeper dialog entirely. See [`docs/PLAN.md`](
 ```sh
 deeptally balance                        # account balance
 deeptally rate                           # peak/off-peak window now, with prices
+deeptally usage [--json] [--days N]      # today, last 7 and last 30 days, then per model
+deeptally import [--full]                # import local opencode usage into the ledger
+deeptally ledger export <path.csv>       # write every raw ledger row as CSV
+deeptally ledger prune --days N          # delete raw rows older than N days (rollups kept)
+deeptally ledger reprice [--json]        # recompute stored costs with the current price table
 deeptally key status                     # which store supplies the key, and any Keychain problem
 deeptally key import [--shell zsh|bash]  # import the key from the login shell into the Keychain
 deeptally key delete                     # forget the stored key
-deeptally usage [--json]                 # usage summary (stub until Step 4)
 deeptally --version | --help
 ```
 
@@ -85,11 +96,14 @@ If the app is running but its status item is hidden, `make kill` is the reliable
 
 ## Privacy
 
-DeepTally talks to exactly one host today: `api.deepseek.com`, for your account balance; a loopback-only proxy
-that forwards your own requests is planned for v1.1, opt-in. `api.github.com` is reserved for a future
-update check and is not contacted by any current build. No analytics. No crash reporting. No third-party
-servers. The API key lives in the macOS Keychain, never in a file or a preference; if the Keychain read fails,
-the app falls back to `DEEPSEEK_API_KEY` and says so in a banner.
+DeepTally talks to exactly one host today: `api.deepseek.com`, for your account balance. Usage history is
+built locally from opencode's database (read-only) into a SQLite ledger at
+`~/Library/Application Support/DeepTally/ledger.sqlite`; a loopback-only proxy that forwards your own requests
+is planned for v1.1, opt-in. `api.github.com` is reserved for a future update check and is not contacted by
+any current build. No analytics. No crash reporting. No third-party servers. The API key lives in the macOS
+Keychain, never in a file or a preference; if the Keychain read fails, the app falls back to
+`DEEPSEEK_API_KEY` and says so in a banner. What the ledger stores, and how to delete it, is in
+[`docs/PRIVACY.md`](docs/PRIVACY.md).
 
 ## License
 

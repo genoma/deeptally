@@ -91,6 +91,8 @@ The CLI is built alongside the app and can be run directly:
 ```sh
 swift run deeptally balance     # prints the account balance
 swift run deeptally rate        # the peak/off-peak window now, no key needed
+swift run deeptally usage       # spend, tokens and cache-hit rate from the local ledger
+swift run deeptally import      # import local opencode usage into the ledger
 ```
 
 Both halves resolve the key the same way — **Keychain first, then `DEEPSEEK_API_KEY`** — so
@@ -106,17 +108,35 @@ in Settings below."* Export `DEEPSEEK_API_KEY` in the file your login shell sour
 preference. Why a GUI app cannot read your shell environment, and everything else the app does, is in
 [`USAGE.md`](USAGE.md).
 
-**2. Decide about launch at login.** **Startup → Launch at login** registers DeepTally through macOS
+**2. Local usage appears by itself — or does not apply.** If opencode is installed, DeepTally imports
+`~/.local/share/opencode/opencode.db` at launch and then every 15 minutes, and the menu bar can show
+**Today's spend** and the **Cache-hit rate** beside the balance ([`USAGE.md`](USAGE.md)). If opencode is not
+installed there is simply nothing to import, and that is not an error: the two ledger-backed metrics stay em
+dashes, Settings adds the quiet line *"Local usage is not being imported yet."*, and the balance, rate panel
+and alerts are unaffected. `deeptally import` says the same thing in a terminal:
+
+```text
+$ deeptally import
+No opencode database at /tmp/deeptally-doc-empty/.local/share/opencode/opencode.db — nothing to import.
+That is expected if you do not use opencode; the ledger records opencode usage only.
+```
+
+(Pasted from a throwaway home directory; on your Mac the path is
+`~/.local/share/opencode/opencode.db`.) The ledger lives at
+`~/Library/Application Support/DeepTally/ledger.sqlite` and holds counters, timestamps, model ids and
+estimated costs — never prompt or completion content ([`PRIVACY.md`](PRIVACY.md)).
+
+**3. Decide about launch at login.** **Startup → Launch at login** registers DeepTally through macOS
 `SMAppService` — no helper bundle, no LaunchAgent. The switch is disabled while the app runs from a temporary
 App Translocation copy, which is one more reason to install into `/Applications` before the first launch.
 
-**3. Every browser-downloaded update needs the Gatekeeper detour again.** Measured 2026-09-24: the exception
+**4. Every browser-downloaded update needs the Gatekeeper detour again.** Measured 2026-09-24: the exception
 is bound to the exact build, so after you approve build 1, build 2 — same bundle ID, different ad-hoc
 signature hash — is killed by the kernel (`Killed: 9`) until it is approved too. That is a *System Settings →
 Privacy & Security → Open Anyway* trip per update for the DMG path. The `curl` install path (Path 1) never
 quarantines the app, so it needs no detour ([`UNSIGNED.md`](UNSIGNED.md), [`SPIKES.md`](SPIKES.md) S1/S6).
 
-**4. Expect no Keychain prompt per update.** Measured: an item written by one build is read back silently by
+**5. Expect no Keychain prompt per update.** Measured: an item written by one build is read back silently by
 the next, because the default keychain ACL is permissive for your own session ([`UNSIGNED.md`](UNSIGNED.md)).
 
 ## Uninstalling
