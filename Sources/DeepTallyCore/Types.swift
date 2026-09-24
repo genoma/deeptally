@@ -254,17 +254,22 @@ public struct RateSnapshot: Sendable, Equatable {
 /// Peak prices in USD per 1M tokens. Off-peak is derived via `PriceTable.offPeakMultiplier`.
 public struct ModelPrice: Sendable, Equatable, Codable {
   public let model: String
+  /// Other ids this row is also known by; resolved after the exact id, see
+  /// ``PriceTable/price(forModel:)``. Empty when the data lists none.
+  public let aliases: [String]
   public let cacheHitUSDPerMillion: Decimal
   public let cacheMissUSDPerMillion: Decimal
   public let outputUSDPerMillion: Decimal
 
   public init(
     model: String,
+    aliases: [String] = [],
     cacheHitUSDPerMillion: Decimal,
     cacheMissUSDPerMillion: Decimal,
     outputUSDPerMillion: Decimal
   ) {
     self.model = model
+    self.aliases = aliases
     self.cacheHitUSDPerMillion = cacheHitUSDPerMillion
     self.cacheMissUSDPerMillion = cacheMissUSDPerMillion
     self.outputUSDPerMillion = outputUSDPerMillion
@@ -272,6 +277,7 @@ public struct ModelPrice: Sendable, Equatable, Codable {
 
   private enum CodingKeys: String, CodingKey {
     case model
+    case aliases
     case cacheHitUSDPerMillion = "cache_hit_usd_per_million"
     case cacheMissUSDPerMillion = "cache_miss_usd_per_million"
     case outputUSDPerMillion = "output_usd_per_million"
@@ -280,6 +286,7 @@ public struct ModelPrice: Sendable, Equatable, Codable {
   public init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     model = try container.decode(String.self, forKey: .model)
+    aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
     cacheHitUSDPerMillion = Decimal.parse(
       try container.decode(String.self, forKey: .cacheHitUSDPerMillion))
     cacheMissUSDPerMillion = Decimal.parse(
@@ -291,6 +298,7 @@ public struct ModelPrice: Sendable, Equatable, Codable {
   public func encode(to encoder: any Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(model, forKey: .model)
+    try container.encode(aliases, forKey: .aliases)
     try container.encode("\(cacheHitUSDPerMillion)", forKey: .cacheHitUSDPerMillion)
     try container.encode("\(cacheMissUSDPerMillion)", forKey: .cacheMissUSDPerMillion)
     try container.encode("\(outputUSDPerMillion)", forKey: .outputUSDPerMillion)
@@ -326,8 +334,25 @@ public struct PriceTable: Sendable, Equatable, Codable {
     self.models = models
   }
 
+  /// The entry that prices `model`, or `nil` when the table does not recognise it.
+  ///
+  /// Lookup is case-sensitive and resolves in this order:
+  /// 1. an exact `model` id;
+  /// 2. an exact alias of any entry;
+  /// 3. the last `/`-separated component of `model` against the `model` ids, which is how a
+  ///    route-prefixed id such as `deepseek/deepseek-v4-flash` resolves;
+  /// 4. that same last component against the aliases.
+  ///
+  /// There is deliberately no fuzzy matching, no prefix matching beyond the route, no version
+  /// ordering and no "closest entry" fallback: an id this table does not know stays unmapped, so a
+  /// caller can report it as unpriced instead of billing it at a guessed price.
   public func price(forModel model: String) -> ModelPrice? {
-    models.first { $0.model == model }
+    if let exact = models.first(where: { $0.model == model }) { return exact }
+    if let alias = models.first(where: { $0.aliases.contains(model) }) { return alias }
+
+    let routed = model.split(separator: "/").last.map(String.init) ?? model
+    if let exact = models.first(where: { $0.model == routed }) { return exact }
+    return models.first { $0.aliases.contains(routed) }
   }
 
   private enum CodingKeys: String, CodingKey {
