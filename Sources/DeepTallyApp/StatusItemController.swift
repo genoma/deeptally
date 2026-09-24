@@ -7,14 +7,32 @@ import SwiftUI
 ///
 /// `NSStatusItem` and not `MenuBarExtra`: on macOS 26+ an accessory app that only has a
 /// `MenuBarExtra` can be killed silently when the user disables the item in Control Center.
+///
+/// The shipped glyph gives way to a warning triangle while the balance is low: that is the plan's
+/// required fallback, because macOS may never deliver the notification the user asked for.
 @MainActor
 final class StatusItemController {
   private let statusItem: NSStatusItem
   private let popover: NSPopover
   private let model: AppModel
 
+  /// The shipped gauge, applied while the balance is fine. Template, so AppKit tints it for light
+  /// and dark menu bars.
+  private let normalGlyph: NSImage?
+  /// The low-balance fallback. Template too, so it tints like the glyph it replaces.
+  private let lowBalanceGlyph: NSImage?
+
   init(model: AppModel) {
     self.model = model
+
+    // The shipped template glyph is copied into Contents/Resources by Scripts/bundle.sh; the name
+    // ends in "Template", so AppKit tints it for light/dark menu bars.
+    normalGlyph = NSImage(named: "MenuBarIconTemplate")
+    normalGlyph?.isTemplate = true
+    lowBalanceGlyph = NSImage(
+      systemSymbolName: "exclamationmark.triangle.fill",
+      accessibilityDescription: "Low DeepSeek balance")
+    lowBalanceGlyph?.isTemplate = true
 
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     popover = NSPopover()
@@ -23,13 +41,7 @@ final class StatusItemController {
     popover.contentViewController = NSHostingController(rootView: PopoverView(model: model))
 
     if let button = statusItem.button {
-      // Shipped template glyph, copied into Contents/Resources by Scripts/bundle.sh.
-      // The name ends in "Template", so AppKit tints it for light/dark menu bars.
-      if let glyph = NSImage(named: "MenuBarIconTemplate") {
-        glyph.isTemplate = true
-        button.image = glyph
-        button.imagePosition = .imageLeading
-      }
+      button.imagePosition = .imageLeading
       button.target = self
       button.action = #selector(togglePopover)
     }
@@ -53,8 +65,15 @@ final class StatusItemController {
     NSApp.activate(ignoringOtherApps: true)
   }
 
+  /// The button's whole presentation comes from the model, so the warning glyph, the title and the
+  /// tooltip all say the same thing `--spike render-popover` reports.
   private func syncLabel() {
-    statusItem.button?.title = model.menuBarLabel
+    guard let button = statusItem.button else { return }
+    let presentation = model.menuBarPresentation
+    button.title = presentation.title
+    button.image =
+      presentation.showsLowBalanceWarning ? (lowBalanceGlyph ?? normalGlyph) : normalGlyph
+    button.toolTip = presentation.tooltip
   }
 
   /// Observation rather than a callback from the model: the title follows `menuBarLabel`, which
@@ -62,7 +81,7 @@ final class StatusItemController {
   /// on its own timer. Re-armed after every change, so one subscription covers the process lifetime.
   private func observeLabel() {
     withObservationTracking {
-      _ = model.menuBarLabel
+      _ = model.menuBarPresentation
     } onChange: { [weak self] in
       Task { @MainActor in
         self?.syncLabel()

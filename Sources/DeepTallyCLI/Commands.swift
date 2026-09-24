@@ -95,9 +95,9 @@ enum CLI {
   /// converted. Resolves the key but never imports one — importing is an explicit user action.
   private static func balance(_ arguments: [String]) async throws {
     try reject(arguments, command: "balance")
-    let resolution = try resolveKey()
+    let resolution = APIKeySource().resolve()
     guard let key = resolution.key else {
-      throw CommandFailure(message: missingKeyMessage, code: .key)
+      throw CommandFailure(message: missingKeyMessage(for: resolution), code: .key)
     }
     let client = DeepSeekClient(keyProvider: { key })
     let balance: Balance
@@ -113,7 +113,7 @@ enum CLI {
     print("\(info.currency) \(info.totalBalance)  (\(availability))")
     print("  granted:   \(info.grantedBalance)")
     print("  topped up: \(info.toppedUpBalance)")
-    if case .environment = resolution {
+    if resolution.origin == .environment {
       // On stderr, so a script reading the balance from stdout is unaffected.
       writeToStandardError(environmentHint)
     }
@@ -124,6 +124,16 @@ enum CLI {
     No API key: the Keychain has none and DEEPSEEK_API_KEY is not set.
     Import it once with: deeptally key import --shell zsh
     """
+
+  /// The missing-key message with the Keychain's own failure when that is the reason: "the Keychain
+  /// has none" would be untrue for a locked keychain or a denied item ACL.
+  private static func missingKeyMessage(for resolution: KeyResolution) -> String {
+    guard let problem = resolution.keychainProblem else { return missingKeyMessage }
+    return """
+      No API key: \(problem); DEEPSEEK_API_KEY is not set.
+      Import it once with: deeptally key import --shell zsh
+      """
+  }
 
   /// Printed after a balance that was paid for by the environment: correct, but it has to be set
   /// again in every new shell.
@@ -211,15 +221,19 @@ enum CLI {
     }
   }
 
-  /// Where the key comes from, and its shape. The shape is deliberately coarse: a length and, only
-  /// for DeepSeek's fixed `sk-` prefix, that prefix.
+  /// Where the key comes from, its shape and any Keychain problem. The shape is deliberately coarse:
+  /// a length and, only for DeepSeek's fixed `sk-` prefix, that prefix. A Keychain read that failed
+  /// while a usable `DEEPSEEK_API_KEY` is set still answers (exit 0); the exit code is 2 only when
+  /// there is no key at all, the same contract as `balance`.
   private static func keyStatus(_ arguments: [String]) throws {
     try reject(arguments, command: "key status")
-    let resolution = try resolveKey()
-    print("source: \(resolution.origin)")
+    let resolution = APIKeySource().resolve()
+    print("source: \(originName(resolution.origin))")
+    if let problem = resolution.keychainProblem {
+      print("keychain: \(problem)")
+    }
     guard let key = resolution.key else {
-      print("run:    deeptally key import --shell zsh")
-      return
+      throw CommandFailure(message: missingKeyMessage(for: resolution), code: .key)
     }
     print("shape:  \(shape(of: key))")
   }
@@ -255,7 +269,7 @@ enum CLI {
       throw CommandFailure(message: "Could not remove the stored key.", code: .key)
     }
     print(hadKey ? "Removed the stored key from the Keychain." : "No stored key in the Keychain.")
-    if case .environment? = try? KeyResolution.resolve() {
+    if APIKeySource(keychain: keychain).resolve().origin == .environment {
       writeToStandardError(environmentStillSet)
     }
   }
@@ -337,6 +351,15 @@ enum CLI {
 
   // MARK: - Shared
 
+  /// The `key status` name for an origin, the same words the app's footer uses.
+  private static func originName(_ origin: KeyResolution.Origin) -> String {
+    switch origin {
+    case .keychain: return "keychain"
+    case .environment: return "environment"
+    case .none: return "none"
+    }
+  }
+
   /// A key's shape, never its value: the length, plus the `sk-` prefix when it is there. Only that
   /// prefix is echoed, because it is the same three characters in every DeepSeek key; any other
   /// leading character could be part of the secret.
@@ -346,19 +369,6 @@ enum CLI {
   }
 
   private static let skPrefix = "sk-"
-
-  /// Resolves the key through ``KeyResolution``; an unreadable store is an unusable key (exit 2),
-  /// not a usage error.
-  private static func resolveKey() throws -> KeyResolution {
-    do {
-      return try KeyResolution.resolve()
-    } catch let error as KeychainError {
-      throw CommandFailure(
-        message: "Could not read the API key from the Keychain (\(describe(error))).", code: .key)
-    } catch {
-      throw CommandFailure(message: "Could not read the API key from the Keychain.", code: .key)
-    }
-  }
 
   /// A command that takes no arguments rejects them rather than ignoring them: a typo'd flag must
   /// not silently change what ran.
@@ -371,48 +381,5 @@ enum CLI {
   /// Errors go to stderr so stdout stays parseable.
   private static func writeToStandardError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
-  }
-}
-
-// MARK: - Key resolution
-
-/// The key the CLI will use, and the store it came from. One precedence order, shared with the app:
-/// Keychain first, then `DEEPSEEK_API_KEY`.
-private enum KeyResolution {
-  case keychain(String)
-  case environment(String)
-  /// Neither store has one.
-  case none
-
-  /// The secret itself, or `nil` for ``none``.
-  var key: String? {
-    switch self {
-    case .keychain(let key), .environment(let key): return key
-    case .none: return nil
-    }
-  }
-
-  /// The origin name `key status` prints.
-  var origin: String {
-    switch self {
-    case .keychain: return "keychain"
-    case .environment: return "environment"
-    case .none: return "none"
-    }
-  }
-
-  /// Asks ``APIKeySource`` twice — once with the environment withheld — rather than re-implementing
-  /// its rules (trimmed, non-empty), so "which key won" cannot drift from "which key is used".
-  static func resolve(
-    keychain: KeychainStore = KeychainStore(),
-    environment: [String: String] = ProcessInfo.processInfo.environment
-  ) throws -> KeyResolution {
-    if let key = try APIKeySource(keychain: keychain, environment: [:]).currentKey() {
-      return .keychain(key)
-    }
-    if let key = try APIKeySource(keychain: keychain, environment: environment).currentKey() {
-      return .environment(key)
-    }
-    return .none
   }
 }

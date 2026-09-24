@@ -8,24 +8,19 @@ import Observation
 /// The integrator: one object that owns the key, the polling schedule, the derived balance state, the
 /// rate-now display, the settings and the notices the popover shows.
 ///
-/// Three rules this type exists to keep:
+/// Four rules this type exists to keep:
 /// - a refresh never runs twice at once, and the next one always comes from `PollingPlan`
 ///   (interval, then backoff, then jitter) rather than from a hand-rolled timer chain;
 /// - nothing blocking runs on the main actor: importing a key is the one blocking call in the app and
 ///   it runs in a detached task;
 /// - the API key leaves the Keychain only as the `Bearer` argument of one request. It is never
-///   logged, never written to `UserDefaults`, and never displayed (AGENTS.md §5).
+///   logged, never written to `UserDefaults`, and never displayed (AGENTS.md §5);
+/// - a low-balance alert is remembered as delivered only after macOS accepted it, so a denial or a
+///   failed post is retried instead of consuming the cooldown; while macOS will not deliver alerts,
+///   the menu bar carries the warning glyph and the popover says so once.
 @MainActor
 @Observable
 final class AppModel {
-  /// Where the key in use came from. `unreadable` carries a Keychain status, never a secret.
-  enum KeyOrigin: Equatable {
-    case none
-    case keychain
-    case environment
-    case unreadable(String)
-  }
-
   /// One notice for the popover's banner slot. Derived from state rather than accumulated, so a
   /// notice that stopped being true cannot linger.
   struct Banner: Identifiable {
@@ -38,7 +33,13 @@ final class AppModel {
 
   private(set) var balanceState: BalanceState?
   private(set) var rateNow: RateNowDisplay?
-  private(set) var keyOrigin: KeyOrigin = .none
+  /// Where the key in use came from, straight from the shared resolver.
+  private(set) var keyOrigin: KeyResolution.Origin = .none
+  /// Why the Keychain read failed, even when a usable `DEEPSEEK_API_KEY` still resolved. A sentence
+  /// from the core resolver: it carries a status code and never any part of a key.
+  private(set) var keychainProblem: String?
+  /// The last authorization macOS reported for alerts, or `nil` before it was ever read.
+  private(set) var alertAuthorization: AlertAuthorization?
   private(set) var isRefreshing = false
   private(set) var isImportingKey = false
   private(set) var importMessage: String?
@@ -72,6 +73,9 @@ final class AppModel {
   private var monitor: BalanceMonitor
   private var notificationPolicy: NotificationPolicy
 
+  /// Set when `refresh()` arrives while a request is in flight; the next run starts when the
+  /// current one finishes, so no caller's refresh is silently dropped.
+  private var needsRefreshAgain = false
   private var pollTask: Task<Void, Never>?
   private var tickerTask: Task<Void, Never>?
   private var wakeTask: Task<Void, Never>?
@@ -94,8 +98,8 @@ final class AppModel {
 
   /// Launch sequence: adopt the persisted reading, render the rate, wire the observers, then fetch.
   func start() {
-    loginItemStatus = LoginItem.status
-    keyOrigin = resolveKey().origin
+    refreshLoginItemStatus()
+    _ = resolveKey()
     lastNotified = environment.launchState.loadLastNotified()
     seedFromStoredReading()
     updateRateNow()
@@ -103,7 +107,7 @@ final class AppModel {
     installNetworkObserver()
     startTicker()
     if settings.notificationsEnabled {
-      Task { await scheduler.requestAuthorization() }
+      Task { await requestNotificationPermission() }
     }
     refresh()
   }
@@ -118,17 +122,20 @@ final class AppModel {
 
   // MARK: - Balance
 
-  /// Fetches the balance once. Never concurrent: while a request is in flight this is a no-op, so a
-  /// wake, a click and a timer cannot stack up three requests.
+  /// Fetches the balance once. Never concurrent: a request that arrives while one is in flight is
+  /// remembered rather than dropped — an import made during a poll must not wait out the whole
+  /// interval — and starts as soon as the current one finishes.
   func refresh() {
-    guard !isRefreshing else { return }
+    guard !isRefreshing else {
+      needsRefreshAgain = true
+      return
+    }
     isRefreshing = true
     Task { await performRefresh() }
   }
 
   private func performRefresh() async {
     let resolution = resolveKey()
-    keyOrigin = resolution.origin
 
     if let key = resolution.key {
       do {
@@ -141,18 +148,29 @@ final class AppModel {
         refreshError = DeepSeekClient.describe(error)
         evaluate()
       }
+    } else {
+      // No key is not a network failure: the banner names the fix, the last reading stays visible and
+      // there is nothing to back off from. An error a previous key produced must not outlive it —
+      // with the request skipped there is nothing left that message could be about.
+      refreshError = nil
     }
-    // No key is not a network failure: the banner names the fix, the last reading stays visible and
-    // there is nothing to back off from.
     isRefreshing = false
     notifyIfLow()
-    scheduleNextRefresh()
+    if needsRefreshAgain {
+      needsRefreshAgain = false
+      refresh()
+    } else {
+      scheduleNextRefresh()
+    }
   }
 
   /// Everything derived from the last reading and the current settings, recomputed in one place so a
   /// settings change, a fresh reading and a launch seed cannot disagree.
   private func evaluate(now: Date = Date()) {
-    balanceState = monitor.evaluate(balance: latestBalance, lastSuccess: lastSuccess, now: now)
+    let next = monitor.evaluate(balance: latestBalance, lastSuccess: lastSuccess, now: now)
+    // The ticker re-evaluates every 30 seconds; writing an unchanged value would invalidate every
+    // observer for nothing.
+    if next != balanceState { balanceState = next }
   }
 
   /// One successful reading: in memory, on disk and in the derived state. `UserDefaults`, not the
@@ -179,7 +197,7 @@ final class AppModel {
   // MARK: - Rate now
 
   /// Re-renders the window label and the countdown. The countdown is time, not data: this needs no
-  /// network and no key, and it is the only thing the 30-second ticker does.
+  /// network and no key.
   private func updateRateNow() {
     guard environment.priceTableProblem == nil else {
       // Without a readable table there are no prices and no windows; the panel says so and a banner
@@ -240,21 +258,32 @@ final class AppModel {
       queue: DispatchQueue(label: "io.github.genoma.deeptally.network", qos: .utility))
   }
 
+  /// The 30-second ticker. The balance state is `BalanceMonitor.evaluate`'s business and that is
+  /// pure, so the tick can keep the age text, the stale flag and the login-item status truthful
+  /// between refreshes — the maximum cadence is four hours, far past the one-hour stale window. It
+  /// never fetches and never notifies.
+  private func tick() {
+    updateRateNow()
+    evaluate()
+    refreshLoginItemStatus()
+  }
+
   private func startTicker() {
     tickerTask?.cancel()
     tickerTask = Task { [weak self] in
       while !Task.isCancelled {
         try? await Task.sleep(for: .seconds(Self.tickerSeconds))
         guard !Task.isCancelled else { return }
-        self?.updateRateNow()
+        self?.tick()
       }
     }
   }
 
   // MARK: - Notifications
 
-  /// Posts the low-balance alert when the policy says the user is due one, and remembers when, so the
-  /// cooldown survives a relaunch. The alert carries the amount and the threshold — never a key.
+  /// Posts the low-balance alert when the policy says the user is due one. The alert carries the
+  /// amount and the threshold — never a key — and the cooldown is stamped only once macOS has
+  /// accepted the notification, so a denial or a failed post is retried instead of silenced.
   private func notifyIfLow() {
     guard settings.notificationsEnabled,
       let state = balanceState,
@@ -262,17 +291,36 @@ final class AppModel {
       let amountText = state.amountText
     else { return }
 
-    let now = Date()
     guard
       notificationPolicy.shouldNotify(
-        isLow: state.isLow, isStale: state.isStale, lastNotified: lastNotified, now: now)
+        isLow: state.isLow, isStale: state.isStale, lastNotified: lastNotified, now: Date())
     else { return }
 
-    lastNotified = now
-    environment.launchState.saveLastNotified(now)
     let threshold = Self.amountText(
       for: settings.lowBalanceThreshold, likeAmount: amountText)
-    Task { await scheduler.postLowBalance(amountText: amountText, threshold: threshold) }
+    Task { await postLowBalance(amountText: amountText, threshold: threshold) }
+  }
+
+  /// The post itself, off the caller. `accepted` decides everything: only a delivered alert consumes
+  /// the cooldown, and the authorization macOS reports is recorded either way so the popover can tell
+  /// "not allowed" from "delivery failed" without guessing.
+  private func postLowBalance(amountText: String, threshold: String) async {
+    let accepted = await scheduler.postLowBalance(amountText: amountText, threshold: threshold)
+    alertAuthorization = await scheduler.authorization()
+    guard accepted else { return }
+    let stamped = Date()
+    lastNotified = stamped
+    environment.launchState.saveLastNotified(stamped)
+  }
+
+  /// Asks macOS for permission and records what it says. The answer can arrive long after the fetch
+  /// that made the balance low, so a grant re-runs the policy: the first alert is delivered then
+  /// instead of waiting for the next poll. The policy still bounds it, so a grant cannot itself
+  /// cause a second alert.
+  private func requestNotificationPermission() async {
+    let granted = await scheduler.requestAuthorization()
+    alertAuthorization = await scheduler.authorization()
+    if granted { notifyIfLow() }
   }
 
   /// The threshold rendered the way the balance is (`$2.00`, `¥2.00`, `CHF 2.00`): the alert is read
@@ -314,6 +362,9 @@ final class AppModel {
         _ = try source.importFromShell(shell)
       }.value
       importMessage = "Imported the key from your \(shell.rawValue) login shell."
+      // A newly imported key is not the key any error on screen came from, and the refresh queued
+      // here must not be dropped just because a poll happens to be in flight.
+      refreshError = nil
       keyOrigin = .keychain
       refresh()
     } catch let error as KeyImportError {
@@ -336,7 +387,10 @@ final class AppModel {
     } catch {
       showImportFailure("Could not remove the stored key.")
     }
-    keyOrigin = resolveKey().origin
+    // Forgetting a key invalidates any error the old one produced: an unresolvable store must not
+    // leave a "401" on screen next to the "No API key yet" banner.
+    refreshError = nil
+    _ = resolveKey()
   }
 
   private func showImportFailure(_ message: String) {
@@ -344,18 +398,18 @@ final class AppModel {
     importMessage = message
   }
 
-  /// The key for the next request, and where it came from. `currentKey()` never runs a shell, so this
-  /// is safe on the main actor.
-  private func resolveKey() -> (key: String?, origin: KeyOrigin) {
-    do {
-      guard let key = try environment.keySource.currentKey() else { return (nil, .none) }
-      // `currentKey()` prefers the Keychain, so an existing item is where the key came from.
-      return (key, environment.keychain.hasItem() ? .keychain : .environment)
-    } catch let error as KeychainError {
-      return (nil, .unreadable(Self.describe(error)))
-    } catch {
-      return (nil, .unreadable("unknown error"))
-    }
+  /// The key for the next request, where it came from and any Keychain problem. `resolve()` never
+  /// runs a shell, so this is safe on the main actor, and it is the single place `keyOrigin` and
+  /// `keychainProblem` are written, so neither can disagree with what a request will actually use.
+  ///
+  /// A different origin is a different key: whatever error the previous one produced (a 401, an
+  /// outage) is cleared here rather than left next to the new state.
+  private func resolveKey() -> KeyResolution {
+    let resolution = environment.keySource.resolve()
+    if resolution.origin != keyOrigin { refreshError = nil }
+    keyOrigin = resolution.origin
+    keychainProblem = resolution.keychainProblem
+    return resolution
   }
 
   /// Where the key comes from, for the footer. Never the key itself, not even its prefix.
@@ -364,7 +418,6 @@ final class AppModel {
     case .none: return "API key: none"
     case .keychain: return "API key: Keychain"
     case .environment: return "API key: DEEPSEEK_API_KEY"
-    case .unreadable: return "API key: Keychain unreadable"
     }
   }
 
@@ -385,7 +438,15 @@ final class AppModel {
     } catch {
       loginItemError = LoginItem.describe(error)
     }
-    loginItemStatus = LoginItem.status
+    refreshLoginItemStatus()
+  }
+
+  /// Re-reads macOS's login-item status. Called at launch, after a toggle and by the ticker: an item
+  /// the user approves in System Settings while the app runs must clear "Waiting for approval…"
+  /// without a relaunch.
+  private func refreshLoginItemStatus() {
+    let status = LoginItem.status
+    if status != loginItemStatus { loginItemStatus = status }
   }
 
   var launchAtLoginEnabled: Bool {
@@ -426,7 +487,7 @@ final class AppModel {
     evaluate()
     scheduleNextRefresh()
     if validated.notificationsEnabled, !previous.notificationsEnabled {
-      Task { await scheduler.requestAuthorization() }
+      Task { await requestNotificationPermission() }
     }
   }
 
@@ -440,6 +501,35 @@ final class AppModel {
     case .balance: return balanceState?.amountText ?? "—"
     case .todaySpend, .cacheHitRate: return "—"
     }
+  }
+
+  /// Everything the status item's button shows, derived in one place so the menu bar and
+  /// `--spike render-popover` cannot disagree — and so the low-balance fallback is provable without
+  /// a human looking at the screen.
+  struct MenuBarPresentation: Equatable {
+    let title: String
+    /// The balance is low: the shipped glyph gives way to a warning triangle, because the alert the
+    /// user asked for may never be delivered.
+    let showsLowBalanceWarning: Bool
+    /// The button's tooltip while the warning is shown, naming the amount; `nil` otherwise.
+    let tooltip: String?
+  }
+
+  var menuBarPresentation: MenuBarPresentation {
+    let isLow = balanceState?.isLow == true
+    var tooltip: String?
+    if isLow, let amountText = balanceState?.amountText {
+      tooltip = "DeepSeek balance \(amountText) is low."
+    }
+    return MenuBarPresentation(
+      title: menuBarLabel, showsLowBalanceWarning: isLow, tooltip: tooltip)
+  }
+
+  /// `true` while the user has alerts switched on but macOS reports them denied. The popover states
+  /// that once, and the menu-bar warning glyph is the fallback. An authorization that was never read
+  /// is not a denial, so nothing is claimed before macOS has said anything.
+  var alertsUnavailable: Bool {
+    settings.notificationsEnabled && alertAuthorization == .denied
   }
 
   // MARK: - Banners
@@ -458,19 +548,18 @@ final class AppModel {
             + "— the login item cannot be registered from here."
         ))
     }
-    switch keyOrigin {
-    case .none:
+    if keyOrigin == .none {
       banners.append(
         Banner(
           id: "no-key", kind: .warning,
           message: "No API key yet. Import it from your login shell in Settings below."))
-    case .unreadable(let detail):
+    }
+    if let keychainProblem {
       banners.append(
         Banner(
-          id: "key-unreadable", kind: .error,
-          message: "Could not read the API key from the Keychain (\(detail))."))
-    case .keychain, .environment:
-      break
+          id: "keychain-problem", kind: .warning,
+          message: "Keychain read problem: \(keychainProblem)."
+            + (keyOrigin == .environment ? " Using DEEPSEEK_API_KEY instead." : "")))
     }
     if let importError {
       banners.append(Banner(id: "key-import", kind: .error, message: importError))

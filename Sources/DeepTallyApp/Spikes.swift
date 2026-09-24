@@ -62,6 +62,7 @@ enum Spikes {
     while (model.balanceState == nil || model.isRefreshing) && Date() < deadline {
       RunLoop.main.run(until: Date().addingTimeInterval(0.2))
     }
+    let menuBar = model.menuBarPresentation
 
     printJSON([
       "command": "render-popover",
@@ -71,6 +72,14 @@ enum Spikes {
       "period": model.rateNow?.periodLabel ?? "none",
       "countdown": model.rateNow?.countdown ?? "none",
       "lowBalanceThreshold": "\(model.settings.lowBalanceThreshold)",
+      // The menu-bar fallback facts a PNG cannot show: the Step 3 review could not see the status
+      // item at all, so the render now reports what the button would carry.
+      "menuBarTitle": menuBar.title,
+      "menuBarWarningGlyph": menuBar.showsLowBalanceWarning,
+      "menuBarTooltip": menuBar.tooltip ?? "",
+      "notificationsEnabled": model.settings.notificationsEnabled,
+      "alertsAvailable": model.alertAuthorization == .authorized,
+      "alertsAuthorization": Self.authorizationName(model.alertAuthorization),
     ])
 
     for (suffix, scheme) in [("", ColorScheme.light), ("-dark", .dark)] {
@@ -93,6 +102,7 @@ enum Spikes {
       settings: Binding(get: { fixture }, set: { fixture = $0 }),
       isImportingKey: false,
       importMessage: nil,
+      alertsUnavailable: model.alertsUnavailable,
       onImportFromShell: { _ in },
       onDeleteKey: {}
     )
@@ -263,6 +273,18 @@ enum Spikes {
   }
 
   // MARK: - Output
+
+  /// The alert authorization as one JSON word, so a render records whether macOS would deliver the
+  /// low-balance alert and, when it would not, why.
+  private static func authorizationName(_ authorization: AlertAuthorization?) -> String {
+    switch authorization {
+    case .authorized: return "authorized"
+    case .denied: return "denied"
+    case .notAsked: return "notAsked"
+    case .unknown: return "unknown"
+    case nil: return "notRead"
+    }
+  }
 
   private static func printJSON(_ payload: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
