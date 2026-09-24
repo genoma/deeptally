@@ -29,7 +29,7 @@ struct RateNowPanel: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
         }
-        priceTable(display.models)
+        priceTable(display.models, currency: display.currency)
       } else {
         Text("Rate information is not available yet.")
           .font(.caption2)
@@ -58,9 +58,9 @@ struct RateNowPanel: View {
       .help("Next transition: \(display.nextTransitionLocal)")
   }
 
-  private func priceTable(_ models: [ModelRate]) -> some View {
+  private func priceTable(_ models: [ModelRate], currency: String) -> some View {
     VStack(alignment: .leading, spacing: 3) {
-      Text("USD per 1M tokens")
+      Text("\(currency) per 1M tokens")
         .font(.caption2)
         .foregroundStyle(.secondary)
 
@@ -130,6 +130,7 @@ struct RateNowPanelPreviews: PreviewProvider {
       windowEndsLocal: "11:00",
       countdown: "2h 14m",
       nextTransitionLocal: "Thu 11:00",
+      currency: "USD",
       models: [
         rate("deepseek-flash", hit: "0.006", miss: "0.30", output: "1.20"),
         rate("deepseek-v4-pro", hit: "0.044", miss: "1.32", output: "3.96"),
@@ -146,6 +147,7 @@ struct RateNowPanelPreviews: PreviewProvider {
       windowEndsLocal: "06:00",
       countdown: "3h 2m",
       nextTransitionLocal: "Fri 06:00",
+      currency: "USD",
       models: [
         rate("deepseek-flash", hit: "0.003", miss: "0.15", output: "0.60"),
         rate("deepseek-v4-pro", hit: "0.022", miss: "0.66", output: "1.98"),

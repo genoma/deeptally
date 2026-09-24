@@ -48,7 +48,6 @@ struct SettingsPanel: View {
       }
 
       VStack(alignment: .leading, spacing: 8) {
-        currencyRow
         keyRow
       }
     }
@@ -168,19 +167,7 @@ struct SettingsPanel: View {
     return rest == 0 ? "\(hours)h" : "\(hours)h \(rest)m"
   }
 
-  // MARK: - Currency and key
-
-  private var currencyRow: some View {
-    labeledRow("Currency") {
-      TextField("as-is", text: $settings.currencyCode)
-        .textFieldStyle(.roundedBorder)
-        .font(.caption)
-        .multilineTextAlignment(.trailing)
-        .frame(width: 68)
-        .accessibilityLabel("Currency code, empty shows the account currency as-is")
-        .help("Leave empty to show the account currency exactly as the API reports it.")
-    }
-  }
+  // MARK: - API key
 
   private var keyRow: some View {
     VStack(alignment: .leading, spacing: 6) {
