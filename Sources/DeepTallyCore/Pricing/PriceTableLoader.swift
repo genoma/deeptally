@@ -101,8 +101,26 @@ public struct PriceTableLoader: Sendable {
   /// named rather than the file name, because the location is the actionable part.
   static func overrideProblem(at url: URL, error: any Error) -> String {
     let path = url.path(percentEncoded: false)
-    return "Ignoring the price override at \(path): \(reason(for: error))."
-      + " Using the bundled price table."
+    return "The price override at \(path) was ignored: \(reason(for: error))."
+      + " The bundled price table is in use."
+  }
+
+  /// A decode failure's detail can carry an entire `NSError` dump - `NSDebugDescription=`, a
+  /// `UserInfo` dictionary, an error domain and code. That is developer noise in a user-facing
+  /// banner, so keep the one clause a person editing the file can act on.
+  static func shortDetail(_ detail: String) -> String {
+    var text = detail
+    if let clause = text.range(of: "NSDebugDescription=") {
+      text = String(text[clause.upperBound...])
+      if let end = text.firstIndex(where: { $0 == "," || $0 == "}" }) {
+        text = String(text[..<end])
+      }
+    }
+    text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    if text.isEmpty {
+      return "the file could not be read"
+    }
+    return text.count > 160 ? String(text.prefix(157)) + "..." : text
   }
 
   /// The reason half of ``overrideProblem(at:error:)``. A decode failure keeps its detail, which
@@ -113,7 +131,7 @@ public struct PriceTableLoader: Sendable {
     case .resourceMissing:
       return "the file is missing or unreadable"
     case .decodeFailed(_, let detail):
-      return "the file is not valid JSON for the price-table schema (\(detail))"
+      return "the file is not valid JSON for the price-table schema (\(shortDetail(detail)))"
     case .noModels:
       return "the table lists no models"
     case .invalidOffPeakMultiplier(let value):

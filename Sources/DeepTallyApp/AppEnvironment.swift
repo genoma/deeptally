@@ -32,6 +32,11 @@ struct AppEnvironment: Sendable {
   /// ``PriceTable/unavailable``, which lists no models, so the rate panel is suppressed rather than
   /// claim a period that no data supports.
   let priceTableProblem: String?
+  /// Set when a user override was rejected but the bundled table is still usable. Prices ARE shown,
+  /// from the bundled table, so this must not suppress the rate panel the way ``priceTableProblem``
+  /// does. Conflating the two produced a banner claiming no prices were available while the panel was
+  /// hidden for a table that was perfectly fine (found by rendering a deliberately broken override).
+  let priceOverrideProblem: String?
   /// Set when `ChinaHolidays.json` could not be read. The table still prices, but peak classification
   /// then misses the public holidays and over-reports peak hours on them.
   let holidayCalendarProblem: String?
@@ -53,12 +58,19 @@ struct AppEnvironment: Sendable {
 
     let table: PriceTable
     let tableProblem: String?
+    let overrideProblem: String?
     do {
-      table = try priceLoader.load()
+      // Diagnostics, not load(): a user override that is present but invalid must fall back to the
+      // bundled table AND say so. `load()` would swallow the reason, leaving the banner slot above
+      // unreachable for exactly the case it exists for (review finding 4).
+      let loaded = try priceLoader.loadWithDiagnostics()
+      table = loaded.table
       tableProblem = nil
+      overrideProblem = loaded.overrideProblem
     } catch {
       table = .unavailable
       tableProblem = Self.describe(error)
+      overrideProblem = nil
     }
 
     // The shipped State Council list and any dates embedded in the price table become one calendar:
@@ -77,6 +89,7 @@ struct AppEnvironment: Sendable {
 
     self.priceTable = table
     self.priceTableProblem = tableProblem
+    self.priceOverrideProblem = overrideProblem
     self.holidayCalendar = calendar
     self.holidayCalendarProblem = calendarProblem
     let engine = PeakOffPeakEngine(table: table, holidayCalendar: calendar)

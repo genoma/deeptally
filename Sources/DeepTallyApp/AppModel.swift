@@ -570,6 +570,11 @@ final class AppModel {
           id: "price-table", kind: .warning,
           message: "Pricing data problem: \(problem) No prices are shown until it is fixed."))
     }
+    if let problem = environment.priceOverrideProblem {
+      // The bundled table is usable, so this is a note, not a failure: the rate panel still shows
+      // prices and the sentence already says which table they came from.
+      banners.append(Banner(id: "price-override", kind: .warning, message: problem))
+    }
     if let problem = environment.holidayCalendarProblem {
       banners.append(
         Banner(
