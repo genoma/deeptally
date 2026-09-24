@@ -35,10 +35,12 @@ enum CLI {
       deeptally key import         Store the key from the login shell in the Keychain
       deeptally key delete         Remove the stored key from the Keychain
       deeptally usage [--json]     Usage summary (lands in Step 4)
+      deeptally ledger reprice     Re-price every stored row with the current price table
       deeptally --version          Print version
       deeptally --help             This help
 
     OPTIONS:
+      --json                       Machine-readable output (`usage`, `ledger reprice`)
       --shell zsh|bash             Login shell for `key import` (default: zsh)
 
     KEY:
@@ -51,9 +53,12 @@ enum CLI {
 
   /// Runs one invocation and returns the process exit code. Failures go to stderr here, so exactly
   /// one place decides what an error looks like.
-  static func run(_ arguments: [String]) async -> Int32 {
+  ///
+  /// `ledgerURL` is injectable for the same reason ``LedgerStore`` takes a URL: a test reads and
+  /// writes a throwaway ledger instead of the developer's real one.
+  static func run(_ arguments: [String], ledgerURL: URL = LedgerStore.standardURL) async -> Int32 {
     do {
-      try await dispatch(arguments)
+      try await dispatch(arguments, ledgerURL: ledgerURL)
       return ExitCode.ok.rawValue
     } catch let failure as CommandFailure {
       writeToStandardError(failure.message)
@@ -70,7 +75,7 @@ enum CLI {
 
   /// A bare `deeptally` prints the help (exit 0); an unknown command prints it too, but on stderr
   /// and with exit code 1.
-  private static func dispatch(_ arguments: [String]) async throws {
+  private static func dispatch(_ arguments: [String], ledgerURL: URL) async throws {
     guard let command = arguments.first else {
       print(usageText)
       return
@@ -80,7 +85,8 @@ enum CLI {
     case "balance": try await balance(rest)
     case "rate": try rate(rest)
     case "key": try key(rest)
-    case "usage": try usage(rest)
+    case "usage": try usage(rest, ledgerURL: ledgerURL)
+    case "ledger": try ledger(rest, ledgerURL: ledgerURL)
     case "--version", "version": print("deeptally \(version)")
     case "--help", "-h": print(usageText)
     default:
@@ -150,20 +156,27 @@ enum CLI {
   /// clock, because that is the clock they act on. Needs no key.
   private static func rate(_ arguments: [String]) throws {
     try reject(arguments, command: "rate")
-    let table: PriceTable
-    let calendar: HolidayCalendar
+    // The loader's precedence, so a user override of PriceTable.json applies here too.
+    let pricing = try pricing()
+    let engine = PeakOffPeakEngine(table: pricing.table, holidayCalendar: pricing.calendar)
+    let presenter = RateNowPresenter(
+      table: pricing.table, engine: engine, timeZone: .current)
+    print(render(presenter.display(at: Date()), table: pricing.table))
+  }
+
+  /// The price table and holiday calendar every command that prices something works from: the shipped
+  /// file (or a valid user override) plus the merged State Council calendar. One place, so `rate`, the
+  /// `usage` warning and `ledger reprice` cannot disagree about what a model costs.
+  static func pricing() throws -> (table: PriceTable, calendar: HolidayCalendar) {
     do {
-      // The loader's precedence, so a user override of PriceTable.json applies here too.
-      table = try PriceTableLoader().load()
-      calendar = try HolidayCalendar.loadBundled()
+      let table = try PriceTableLoader().load()
+      let calendar = try HolidayCalendar.loadBundled()
         .merging(HolidayCalendar(source: "PriceTable.json", dates: table.holidays))
+      return (table, calendar)
     } catch let error as PricingDataError {
       throw CommandFailure(
         message: "Could not load the pricing data: \(describe(error))", code: .failure)
     }
-    let engine = PeakOffPeakEngine(table: table, holidayCalendar: calendar)
-    let presenter = RateNowPresenter(table: table, engine: engine, timeZone: .current)
-    print(render(presenter.display(at: Date()), table: table))
   }
 
   /// The rate display as text: a headline, three context lines, one line per model.
@@ -335,18 +348,244 @@ enum CLI {
     }
   }
 
+  // MARK: - ledger
+
+  private static let ledgerUsage = "usage: deeptally ledger reprice [--json]"
+
+  private static func ledger(_ arguments: [String], ledgerURL: URL) throws {
+    guard let subcommand = arguments.first else {
+      throw CommandFailure(message: ledgerUsage, code: .failure)
+    }
+    let rest = Array(arguments.dropFirst())
+    switch subcommand {
+    case "reprice": try ledgerReprice(rest, ledgerURL: ledgerURL)
+    default:
+      throw CommandFailure(
+        message: "Unknown ledger subcommand \"\(subcommand)\".\n\(ledgerUsage)", code: .failure)
+    }
+  }
+
+  /// `deeptally ledger reprice [--json]` — recompute every stored cost with the current price table.
+  ///
+  /// A row's cost is written once, at import, and a row whose model id did not resolve then keeps a
+  /// zero forever: re-importing cannot fix it, because `raw_hash` makes it a duplicate. This command
+  /// is the repair, and the only one that changes what the ledger already recorded.
+  private static func ledgerReprice(_ arguments: [String], ledgerURL: URL) throws {
+    let wantsJSON: Bool
+    switch arguments {
+    case []: wantsJSON = false
+    case ["--json"]: wantsJSON = true
+    default: throw CommandFailure(message: ledgerUsage, code: .failure)
+    }
+
+    let outcome = try reprice(ledgerURL: ledgerURL)
+    let currency = try pricing().table.currency
+    print(
+      wantsJSON
+        ? try renderJSON(outcome, currency: currency)
+        : renderText(outcome, currency: currency))
+  }
+
+  /// The reprice itself, separated from the printing so a test can run it without capturing stdout.
+  static func reprice(ledgerURL: URL) throws -> RepriceOutcome {
+    let store = try openLedger(ledgerURL)
+    let pricing = try pricing()
+    let engine = CostEngine(table: pricing.table, holidayCalendar: pricing.calendar)
+    do {
+      return try store.reprice(costing: engine)
+    } catch let error as LedgerError {
+      throw CommandFailure(
+        message: "Could not reprice the ledger: \(describe(error))", code: .failure)
+    }
+  }
+
+  /// The plain report: what changed, what the raw rows add up to before and after, and which model
+  /// ids still have no price. The last part is the actionable one — the fix is a price table entry per
+  /// id — so it is named even though the count alone would be shorter.
+  static func renderText(_ outcome: RepriceOutcome, currency: String) -> String {
+    let table =
+      outcome.priceTableVersion.isEmpty
+      ? "an unnamed price table" : "price table \(outcome.priceTableVersion)"
+    let changed =
+      outcome.madeNoChanges ? "nothing changed" : "\(grouped(outcome.rowsChanged)) rows changed"
+    var lines = [
+      "Repriced \(grouped(outcome.rowsExamined)) rows with \(table) (\(currency)); \(changed)."
+    ]
+    if outcome.madeNoChanges, outcome.previousPriceTableVersion == outcome.priceTableVersion {
+      lines[0] += " The costs already came from this table."
+    }
+    lines.append("  spend before: \(money(outcome.spendBeforeUSD))")
+    lines.append("  spend after:  \(money(outcome.spendAfterUSD))")
+    guard outcome.rowsUnpriced > 0 else {
+      lines.append("  unpriced:     none")
+      return lines.joined(separator: "\n")
+    }
+    lines.append(
+      "  unpriced:     \(grouped(outcome.rowsUnpriced)) rows the table does not price")
+    lines.append(contentsOf: unpricedLines(outcome.unpricedModels))
+    lines.append("    Add those ids to the price table, then run `deeptally ledger reprice` again.")
+    return lines.joined(separator: "\n")
+  }
+
+  /// The machine-readable report. Numbers are numbers and money is a six-decimal string — the
+  /// ledger's own resolution — so nothing rounds between the file and the reader. `previousPriceTableVersion`
+  /// is absent when the ledger has never been repriced (a JSON `null` to any reader).
+  static func renderJSON(_ outcome: RepriceOutcome, currency: String) throws -> String {
+    let report = RepriceReport(
+      currency: currency,
+      rowsExamined: outcome.rowsExamined,
+      rowsChanged: outcome.rowsChanged,
+      spendBefore: money(outcome.spendBeforeUSD),
+      spendAfter: money(outcome.spendAfterUSD),
+      spendDelta: money(outcome.spendDeltaUSD),
+      rowsUnpriced: outcome.rowsUnpriced,
+      unpricedModels: outcome.unpricedModels.map {
+        RepriceReport.Unpriced(model: $0.model, rows: $0.rows, spend: money($0.spendUSD))
+      },
+      priceTableVersion: outcome.priceTableVersion,
+      previousPriceTableVersion: outcome.previousPriceTableVersion
+    )
+    let encoder = JSONEncoder()
+    // Sorted keys and unescaped slashes: model ids contain `/`, and a report a human reads should
+    // print them the way the ledger spells them.
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return String(decoding: try encoder.encode(report), as: UTF8.self)
+  }
+
+  /// The `--json` shape. A script parses this, so the spelling of every key is chosen here and not
+  /// left to a property name.
+  private struct RepriceReport: Encodable {
+    struct Unpriced: Encodable {
+      let model: String
+      let rows: Int
+      let spend: String
+    }
+
+    let currency: String
+    let rowsExamined: Int
+    let rowsChanged: Int
+    let spendBefore: String
+    let spendAfter: String
+    let spendDelta: String
+    let rowsUnpriced: Int
+    let unpricedModels: [Unpriced]
+    let priceTableVersion: String
+    let previousPriceTableVersion: String?
+  }
+
+  /// One line per unpriced model id, the id column padded so the numbers line up.
+  private static func unpricedLines(_ models: [UnpricedModel]) -> [String] {
+    let width = models.map { $0.model.count }.max() ?? 0
+    return models.map { model in
+      let id = model.model.padding(toLength: width, withPad: " ", startingAt: 0)
+      return "    \(id)   \(grouped(model.rows)) rows  \(money(model.spendUSD))"
+    }
+  }
+
   // MARK: - usage
 
-  /// The ledger lands in Step 4; until then this is the stub it always was.
-  private static func usage(_ arguments: [String]) throws {
+  /// The ledger lands in Step 4; until then this is the stub it always was, plus the one thing a user
+  /// should not have to run a separate command to discover: rows the current price table cannot price.
+  private static func usage(_ arguments: [String], ledgerURL: URL) throws {
     switch arguments {
     case []:
       print("Usage summary lands in Step 4 (see docs/PLAN.md).")
+      if let warning = try unpricedWarning(ledgerURL: ledgerURL) { print(warning) }
     case ["--json"]:
       print(#"{"status":"not_implemented","step":4}"#)
     default:
       throw CommandFailure(message: "usage: deeptally usage [--json]", code: .failure)
     }
+  }
+
+  /// A short warning naming the models nothing can price, or `nil` when there is no ledger to look at
+  /// or nothing is missing. The cap is deliberate: a warning that lists thirty model ids is not a
+  /// warning, and `ledger reprice` prints all of them.
+  static func unpricedWarning(ledgerURL: URL) throws -> String? {
+    guard FileManager.default.fileExists(atPath: ledgerURL.path) else { return nil }
+    let store = try openLedger(ledgerURL)
+    let pricing = try pricing()
+    let engine = CostEngine(table: pricing.table, holidayCalendar: pricing.calendar)
+
+    let summary: UnpricedSummary
+    do {
+      summary = try store.unpricedSummary(costing: engine)
+    } catch let error as LedgerError {
+      throw CommandFailure(message: "Could not read the ledger: \(describe(error))", code: .failure)
+    }
+    guard summary.rowsUnpriced > 0 else { return nil }
+
+    let named = summary.models.prefix(3)
+      .map { "\($0.model) \(grouped($0.rows))" }
+      .joined(separator: ", ")
+    let remaining = max(0, summary.models.count - 3)
+    let more = remaining > 0 ? ", +\(remaining) more" : ""
+    return """
+      warning: \(grouped(summary.rowsUnpriced)) of \(grouped(summary.rowsExamined)) ledger rows have no price (\(named)\(more)).
+               Fix the price table, then run `deeptally ledger reprice`.
+      """
+  }
+
+  /// Opens the ledger, mapping the store's typed failures to one sentence. The messages are built
+  /// from paths, SQL contexts and sqlite's own diagnostics, none of which carry measured data.
+  private static func openLedger(_ url: URL) throws -> LedgerStore {
+    do {
+      return try LedgerStore(url: url)
+    } catch let error as LedgerError {
+      throw CommandFailure(message: "Could not open the ledger: \(describe(error))", code: .failure)
+    } catch {
+      throw CommandFailure(message: "Could not open the ledger.", code: .failure)
+    }
+  }
+
+  /// `LedgerError` as a sentence. The CSV line number is the one a text editor shows.
+  private static func describe(_ error: LedgerError) -> String {
+    switch error {
+    case .cannotCreateDirectory(let path, let reason):
+      return "could not create \(path) (\(reason))"
+    case .cannotOpen(let path, let reason):
+      return "could not open \(path) (\(reason))"
+    case .unsupportedSchemaVersion(let found, let supported):
+      return
+        "the file was written by a newer DeepTally (schema \(found), this build reads \(supported))"
+    case .busy:
+      return "another process holds the write lock"
+    case .statementFailed(let context, let code, let message):
+      return "\(context) failed (sqlite \(code): \(message))"
+    case .emptyRawHash(let row):
+      return "row \(row) carries no dedupe key"
+    case .fileMissing(let path):
+      return "\(path) does not exist"
+    case .unreadableFile(let path, let reason):
+      return "\(path) could not be read (\(reason))"
+    case .cannotWrite(let path, let reason):
+      return "\(path) could not be written (\(reason))"
+    case .malformedCSV(let line, let reason):
+      return "line \(line) is not usable CSV (\(reason))"
+    }
+  }
+
+  /// Money as text: six decimals, POSIX locale, no grouping. Six decimals is the ledger's own
+  /// resolution (micro-USD), so no amount rounds on its way to the screen, and the plain report and
+  /// the JSON say the same digits.
+  static func money(_ amount: Decimal) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = false
+    formatter.minimumFractionDigits = 6
+    formatter.maximumFractionDigits = 6
+    return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "\(amount)"
+  }
+
+  /// Row counts as text, grouped for a human and pinned to a POSIX locale so the same ledger prints
+  /// the same bytes on every machine.
+  static func grouped(_ value: Int) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = true
+    return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
   }
 
   // MARK: - Shared

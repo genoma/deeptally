@@ -380,6 +380,242 @@ public final class LedgerStore {
       request_count = excluded.request_count
     """
 
+  // MARK: - Reprice
+
+  /// The `meta` key recording which price table produced the costs the ledger holds now.
+  public static let repricePriceTableVersionKey = "reprice.price_table_version"
+
+  /// The table version the last ``reprice(costing:batchSize:)`` recorded, or `nil` when the ledger has
+  /// never been repriced. Comparing it with the price table in hand is the whole of "is a reprice
+  /// worthwhile?": equal means the stored costs already came from that table.
+  public func recordedRepricePriceTableVersion() throws -> String? {
+    try metaValue(Self.repricePriceTableVersionKey)
+  }
+
+  /// Reprices every raw row from **its own** model, token counters and timestamp, and rewrites only
+  /// the rows whose cost actually changes.
+  ///
+  /// ## Why this exists
+  /// A row is priced once, at import, and the cost is stored beside its tokens (see
+  /// ``insert(_:rawHash:)``). Deduplication is by `raw_hash`, so re-importing the source cannot
+  /// correct a row that was priced wrong: the row is already there and that is correct for counting.
+  /// Without this pass an unresolved model id keeps its wrong cost forever, and a user who fixes the
+  /// price table gains nothing on the history they already have.
+  ///
+  /// ## What it does
+  /// `costing` decides the cost of one `(model, usage, timestamp)`, and each row is priced with the
+  /// window in force at its *own* instant — a reprice recomputes history from records, it does not
+  /// restate it at today's prices. Rows the costing cannot price are counted and reported, never
+  /// written (see ``RowCosting/costIfPriced(model:usage:at:)``). The `daily` rollups are rebuilt from
+  /// the recomputed rows inside the same transaction, so a committed reprice never leaves `daily`
+  /// disagreeing with `request`.
+  ///
+  /// Idempotent: a second call with the same costing finds every row already correct, writes nothing
+  /// and reports ``RepriceOutcome/madeNoChanges``.
+  ///
+  /// Bounded memory: rows are read in primary-key batches of `batchSize` (`WHERE id > ?` / `LIMIT`),
+  /// so a 400,000-row ledger costs one batch at a time rather than the whole table. A batch is read
+  /// into memory and its cursor closed before that batch is written, because reading and writing the
+  /// same table through one pending `SELECT` has no defined visibility. `batchSize` is a parameter
+  /// only so a test can force several pages.
+  ///
+  /// Atomic: rows, rollups and the recorded price-table version commit together, so an interrupted
+  /// reprice changes nothing at all.
+  ///
+  /// - Note: ``RepriceOutcome/spendBeforeUSD`` and ``RepriceOutcome/spendAfterUSD`` total the raw rows
+  ///   this pass examined. `daily` also keeps days whose raw rows were pruned, so those two totals are
+  ///   the ledger's *repricable* spend, not the whole of `daily`.
+  public func reprice(costing: any RowCosting, batchSize: Int = 2_000) throws -> RepriceOutcome {
+    let previousVersion = try metaValue(Self.repricePriceTableVersionKey)
+
+    return try inTransaction {
+      let update = try prepare(Self.repriceUpdateSQL, context: "reprice update")
+      defer { _ = sqlite3_finalize(update) }
+
+      var examined = 0
+      var changed = 0
+      var spendBefore: Int64 = 0
+      var spendAfter: Int64 = 0
+      var unpriced: [String: ModelTally] = [:]
+
+      try forEachCostRow(batchSize: batchSize) { row in
+        examined += 1
+        spendBefore += row.storedMicroUSD
+        guard
+          let cost = costing.costIfPriced(
+            model: row.model, usage: row.usage, at: row.timestamp)
+        else {
+          // No price for this id: the stored cost stands and the row is only counted. It is *not*
+          // zeroed — a zero written here would be indistinguishable from a measured zero.
+          unpriced[row.model, default: ModelTally()].add(row.storedMicroUSD)
+          spendAfter += row.storedMicroUSD
+          return
+        }
+        let microUSD = MicroUSD.fromDecimal(cost)
+        if microUSD != row.storedMicroUSD {
+          try updateCost(update, microUSD: microUSD, id: row.id)
+          changed += 1
+        }
+        spendAfter += microUSD
+      }
+
+      if changed > 0 { try rebuildDailyRollupsUnconditionally() }
+      if !costing.priceTableVersion.isEmpty {
+        try setMetaValue(Self.repricePriceTableVersionKey, costing.priceTableVersion)
+      }
+
+      return RepriceOutcome(
+        rowsExamined: examined,
+        rowsChanged: changed,
+        rowsUnpriced: unpriced.values.reduce(0) { $0 + $1.rows },
+        unpricedModels: Self.unpricedModels(from: unpriced),
+        spendBeforeUSD: MicroUSD.decimal(spendBefore),
+        spendAfterUSD: MicroUSD.decimal(spendAfter),
+        priceTableVersion: costing.priceTableVersion,
+        previousPriceTableVersion: previousVersion
+      )
+    }
+  }
+
+  /// What the current costing cannot price, without writing anything: the scan ``reprice(costing:batchSize:)``
+  /// performs, reported instead of applied. This is what lets a caller say "4,237 rows have no price,
+  /// and deepseek/deepseek-v4-flash-vision-exp is 2,750 of them" without first changing the ledger.
+  ///
+  /// Not a snapshot: it takes no write lock, so an import running concurrently can land between two
+  /// batches. It is a report to show a user, not a decision to store.
+  public func unpricedSummary(
+    costing: any RowCosting, batchSize: Int = 2_000
+  ) throws -> UnpricedSummary {
+    var examined = 0
+    var unpriced: [String: ModelTally] = [:]
+
+    try forEachCostRow(batchSize: batchSize) { row in
+      examined += 1
+      let cost = costing.costIfPriced(model: row.model, usage: row.usage, at: row.timestamp)
+      if cost == nil { unpriced[row.model, default: ModelTally()].add(row.storedMicroUSD) }
+    }
+
+    return UnpricedSummary(
+      rowsExamined: examined,
+      rowsUnpriced: unpriced.values.reduce(0) { $0 + $1.rows },
+      models: Self.unpricedModels(from: unpriced))
+  }
+
+  /// How many rows one model id contributed, and what they carry.
+  private struct ModelTally {
+    var rows = 0
+    var spend: Int64 = 0
+
+    mutating func add(_ storedMicroUSD: Int64) {
+      rows += 1
+      spend += storedMicroUSD
+    }
+  }
+
+  /// The tallies as a list, biggest gap first and ties by model id, so two runs over one ledger
+  /// produce the same table.
+  private static func unpricedModels(from tallies: [String: ModelTally]) -> [UnpricedModel] {
+    tallies
+      .map {
+        UnpricedModel(
+          model: $0.key, rows: $0.value.rows, spendUSD: MicroUSD.decimal($0.value.spend))
+      }
+      .sorted { $0.rows == $1.rows ? $0.model < $1.model : $0.rows > $1.rows }
+  }
+
+  /// One raw row as a reprice sees it: the inputs to a cost, plus what the row says now.
+  private struct CostRow {
+    let id: Int64
+    let timestamp: Date
+    let model: String
+    let usage: TokenUsage
+    let storedMicroUSD: Int64
+  }
+
+  /// Streams every raw row in primary-key order, `batchSize` at a time, and calls `body` once per row.
+  ///
+  /// The cursor is reset before the first row of a batch is handed out, so `body` may write to
+  /// `request` without the scan seeing its own writes. `id` is the rowid, so this is an index walk and
+  /// not a sort, and the walk starts below every possible id so "every raw row" does not depend on
+  /// rowids being positive. A row inserted while the scan runs is either picked up or left for the next
+  /// pass — it was priced at insert either way.
+  private func forEachCostRow(batchSize: Int, _ body: (CostRow) throws -> Void) throws {
+    let size = max(1, batchSize)
+    let select = try prepare(Self.repriceSelectSQL, context: "reprice scan")
+    defer { _ = sqlite3_finalize(select) }
+
+    var lastID = Int64.min
+    while true {
+      var batch: [CostRow] = []
+      _ = sqlite3_reset(select)
+      _ = sqlite3_clear_bindings(select)
+      try bind(select, 1, lastID)
+      try bind(select, 2, Int64(size))
+      while true {
+        let step = sqlite3_step(select)
+        if step == SQLITE_DONE { break }
+        guard step == SQLITE_ROW else {
+          throw Self.error(step, context: "reprice scan", message: Self.errorMessage(database))
+        }
+        batch.append(costRow(select))
+      }
+      _ = sqlite3_reset(select)
+      guard let last = batch.last else { return }
+      for row in batch { try body(row) }
+      lastID = last.id
+    }
+  }
+
+  /// Decodes one `repriceSelectSQL` row. The token mapping is the exact inverse of the one
+  /// ``insert(_:rawHash:)`` applies: `input + cache_write` is the miss count, `output + reasoning`
+  /// the completion count (reasoning is billed as output and is already inside completion), and the
+  /// prompt total is both of those plus `cache_read`.
+  private func costRow(_ statement: OpaquePointer) -> CostRow {
+    let input = sqlite3_column_int64(statement, 3)
+    let output = sqlite3_column_int64(statement, 4)
+    let reasoning = sqlite3_column_int64(statement, 5)
+    let cacheRead = sqlite3_column_int64(statement, 6)
+    let cacheWrite = sqlite3_column_int64(statement, 7)
+    let cacheMiss = input + cacheWrite
+    let completion = output + reasoning
+    return CostRow(
+      id: sqlite3_column_int64(statement, 0),
+      timestamp: Date(timeIntervalSince1970: TimeInterval(sqlite3_column_int64(statement, 1))),
+      model: text(statement, 2) ?? "",
+      usage: TokenUsage(
+        promptTokens: Int(cacheMiss + cacheRead),
+        completionTokens: Int(completion),
+        cacheHitTokens: Int(cacheRead),
+        cacheMissTokens: Int(cacheMiss),
+        reasoningTokens: Int(reasoning)
+      ),
+      storedMicroUSD: sqlite3_column_int64(statement, 8)
+    )
+  }
+
+  /// Writes one row's cost. Only ever called for a row whose cost differs, which is why
+  /// ``RepriceOutcome/rowsChanged`` and the number of `request` writes are the same number.
+  private func updateCost(_ statement: OpaquePointer, microUSD: Int64, id: Int64) throws {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, microUSD)
+    try bind(statement, 2, id)
+    let step = sqlite3_step(statement)
+    guard step == SQLITE_DONE else {
+      throw Self.error(step, context: "reprice update", message: Self.errorMessage(database))
+    }
+  }
+
+  private static let repriceSelectSQL = """
+    SELECT id, ts, model, input, output, reasoning, cache_read, cache_write, cost_micro_usd
+      FROM request
+     WHERE id > ?1
+     ORDER BY id
+     LIMIT ?2
+    """
+
+  private static let repriceUpdateSQL = "UPDATE request SET cost_micro_usd = ?1 WHERE id = ?2"
+
   // MARK: - Summary
 
   /// Totals over the raw rows in `since ..< until`, optionally narrowed to one provider.
