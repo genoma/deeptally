@@ -260,7 +260,15 @@ enum CLI {
   /// `import`, the `usage` warning and `ledger reprice` cannot disagree about what a model costs.
   static func pricing() throws -> (table: PriceTable, calendar: HolidayCalendar) {
     do {
-      let table = try PriceTableLoader().load()
+      // Diagnostics, not load(): a user override that is present but rejected (bad JSON, a price that
+      // is not a number, a duplicate alias) must be reported rather than silently priced around. The
+      // app already surfaces this through its banner; the CLI said nothing, so a user with a broken
+      // override saw correct bundled prices and no explanation for why their edits had no effect.
+      let loaded = try PriceTableLoader().loadWithDiagnostics()
+      if let problem = loaded.overrideProblem {
+        FileHandle.standardError.write(Data("warning: \(problem)\n".utf8))
+      }
+      let table = loaded.table
       let calendar = try HolidayCalendar.loadBundled()
         .merging(HolidayCalendar(source: "PriceTable.json", dates: table.holidays))
       return (table, calendar)
