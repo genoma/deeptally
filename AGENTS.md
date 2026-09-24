@@ -174,6 +174,12 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
     **one stable domain** (see `Tests/DeepTallyCoreTests/SettingsTests.swift`) rather than a UUID per test,
     or a run leaves residue that accumulates forever. That suite is marked `.serialized` so a single shared
     domain is safe.
+13. **Never write `#Preview` in this repo.** It expands via the `PreviewsMacros` plugin, which ships with
+    Xcode; Command Line Tools has no copy of it, so `swift build` fails with "external macro implementation
+    type 'PreviewsMacros.SwiftUIView' could not be found". Use `PreviewProvider` structs instead — they still
+    render in Xcode's canvas. Do not "fix" this with `#if canImport(PreviewsMacros)`: `canImport` resolves
+    importable modules, not macro plugin dylibs, so that condition is false on every toolchain and would just
+    hide dead code.
 
 ## 10. Definition of done
 
