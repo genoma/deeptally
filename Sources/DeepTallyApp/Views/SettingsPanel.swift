@@ -7,10 +7,8 @@ import SwiftUI
 /// The panel writes only through `settings` and reports actions by calling the closures; it runs no
 /// shell, opens no Keychain item and knows no key (AGENTS.md §5).
 struct SettingsPanel: View {
-  /// Kept in step with the ranges `AppSettings.validated()` enforces; the controls need them to
-  /// stop at the same limits instead of letting a value be clamped behind the user's back.
-  private static let refreshIntervalRange = 5...240
-  private static let cooldownRange = 15...10_080
+  // Control bounds come straight from AppSettings, so the UI and the clamping cannot drift apart
+  // while validated() stays the single enforcement point.
 
   @Binding private var settings: AppSettings
   private let isImportingKey: Bool
@@ -65,7 +63,7 @@ struct SettingsPanel: View {
         Text("\(settings.refreshIntervalMinutes) min")
           .font(.caption.monospacedDigit())
           .foregroundStyle(.secondary)
-        Stepper("", value: $settings.refreshIntervalMinutes, in: Self.refreshIntervalRange)
+        Stepper("", value: $settings.refreshIntervalMinutes, in: AppSettings.refreshIntervalRange)
           .labelsHidden()
           .controlSize(.small)
           .accessibilityLabel("Refresh interval in minutes")
@@ -130,7 +128,7 @@ struct SettingsPanel: View {
         Stepper(
           "",
           value: $settings.notificationCooldownMinutes,
-          in: Self.cooldownRange,
+          in: AppSettings.notificationCooldownRange,
           step: 30
         )
         .labelsHidden()

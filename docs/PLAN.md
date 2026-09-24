@@ -169,7 +169,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [ ] App wiring: import UI replacing the "No API key" dead end, polling on wake/manual, settings sheet, rate-now panel, **translocation banner** (S2 showed real launches running from AppTranslocation)
 - [ ] Launch at login via `SMAppService.mainApp` — **no LaunchAgent fallback**: S3 measured ad-hoc registration working (status `enabled`, no prompt)
 - [ ] Notifications wired to `NotificationPolicy`, with a menu-bar fallback when denied
-- [ ] CLI: `deeptally key import|status|delete`, `deeptally rate`
+- [x] CLI: `deeptally key import|status|delete`, `deeptally rate` *(lane CLI — 418 lines; `rate` correctly reports a Mid-Autumn holiday today, and the key is never printed)*
 - [ ] Docs: `docs/USAGE.md` + privacy update for the Keychain item
   **Gate:** real balance visible; survives kill/restart, sleep/wake and airplane mode; login item registers on a fresh install.
   **Lanes:** Wave A (keychain, settings, rate, balance) merged · Wave B (views, cli, integration, docs)
@@ -254,3 +254,4 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 1 | `ChinaHolidays.json` filled with the official 2026 State Council list (33 days) + integration test on shipped data |
 | 2026-09-24 | 2 | Spikes complete. Measured: SMAppService works under ad-hoc (no LaunchAgent needed); notifications grant; Keychain does NOT re-prompt across rebuilds (docs corrected); Gatekeeper exceptions are **per-build**, so every browser-downloaded update needs a fresh approval; App Translocation observed twice on real launches. |
 | 2026-09-24 | 3 | Wave A merged (keychain, settings, rate, balance): 12 files, 150 tests in 25 suites, lint clean. Quit affordance added. Settings-test preference residue reduced from one file per run to exactly one. |
+| 2026-09-24 | 3 | Wave B1 merged (views, CLI): four presentation views + `deeptally rate`/`key` commands. Two spec bugs caught by lanes: `#Preview` cannot compile under CLT (now AGENTS.md gotcha 13) and the CLI had to resolve keys keychain-first for its own advice to work. |

@@ -45,11 +45,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
   /// (Backticks are required on the declaration only — callers write `AppSettings.default`.)
   public static let `default` = AppSettings()
 
-  /// The supported range of each clamped field. Private: `validated()` is the only spelling of the
-  /// limits, so there is nothing to keep in sync.
-  private static let refreshIntervalRange = 5...240
-  private static let lowBalanceThresholdRange: ClosedRange<Decimal> = 0...1000
-  private static let notificationCooldownRange = 15...10_080
+  /// The supported range of each clamped field. Public so UI controls can stop at the same limits
+  /// instead of letting a value be clamped behind the user's back; `validated()` stays the single
+  /// enforcement point.
+  public static let refreshIntervalRange = 5...240
+  public static let lowBalanceThresholdRange: ClosedRange<Decimal> = 0...1000
+  public static let notificationCooldownRange = 15...10_080
 
   /// The same settings with every numeric field pulled into its supported range.
   public func validated() -> AppSettings {
