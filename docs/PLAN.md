@@ -160,14 +160,19 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Gate:** findings recorded in `docs/SPIKES.md` with observed output; fallbacks chosen for S3/S4 if they fail.
 
 ### Step 3 — Balance, menu bar, lifecycle
-- [ ] Balance polling (15–30 min, on wake, manual), "as of" display, stale indicator
-- [ ] Low-balance notification; `UNUserNotificationCenter` with menu-bar badge fallback
-- [ ] Launch at login: `SMAppService` primary, `LaunchAgent` fallback (per S3)
-- [ ] Offline/wake handling (`NWPathMonitor`, `NSWorkspace.didWakeNotification`)
-- [ ] **Rate-now indicator**: peak/off-peak computed in UTC, displayed in the user's local timezone, with the next
-      transition and a countdown; effective cache-hit/cache-miss/output $/1M for the current window per model
-- [ ] Settings: alert threshold, menu bar metric mode, refresh cadence, currency display
+**Status:** core logic merged (Wave A) · app wiring + UI in progress (Wave B)
+- [x] Keychain-backed API key: `KeychainStore` + `APIKeySource`, one-time import from the shell rc *(lane KEYCHAIN — 20 tests; the key is never logged, errors never echo it)*
+- [x] Settings model: `AppSettings` + `SettingsStore`, tolerant decoding + clamping (\$2 threshold, 20 min cadence, balance metric) *(lane SETTINGS — 14 tests)*
+- [x] Rate-now presenter: local-time window, countdown, effective per-model prices *(lane RATE — 12 tests; non-vacuity proven by mutating the rounding and watching tests fail)*
+- [x] Balance logic: `BalanceMonitor`, `PollingPlan` (jitter is additive only), `NotificationPolicy` *(lane BALANCE — 30 tests, re-run green under 5 timezones)*
+- [x] Quit affordance: popover Quit button + `make kill`, documented in README
+- [ ] App wiring: import UI replacing the "No API key" dead end, polling on wake/manual, settings sheet, rate-now panel, **translocation banner** (S2 showed real launches running from AppTranslocation)
+- [ ] Launch at login via `SMAppService.mainApp` — **no LaunchAgent fallback**: S3 measured ad-hoc registration working (status `enabled`, no prompt)
+- [ ] Notifications wired to `NotificationPolicy`, with a menu-bar fallback when denied
+- [ ] CLI: `deeptally key import|status|delete`, `deeptally rate`
+- [ ] Docs: `docs/USAGE.md` + privacy update for the Keychain item
   **Gate:** real balance visible; survives kill/restart, sleep/wake and airplane mode; login item registers on a fresh install.
+  **Lanes:** Wave A (keychain, settings, rate, balance) merged · Wave B (views, cli, integration, docs)
 
 ### Step 4 — Ledger, pricing, importer
 - [ ] `LedgerStore` + migrations + dedupe (`raw_hash`); pricing table + holiday calendar + peak/off-peak engine
@@ -247,3 +252,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 1 | opencode importer evidence: both schema generations live with disjoint rows (2590 / 1062 / 1638 overlap); union rule adopted, 0 divergent counters |
 | 2026-09-24 | 1 | Menu bar glyph revised to a gauge after a measured bars-vs-gauge comparison; app icon/hero byte-identical across the revision |
 | 2026-09-24 | 1 | `ChinaHolidays.json` filled with the official 2026 State Council list (33 days) + integration test on shipped data |
+| 2026-09-24 | 2 | Spikes complete. Measured: SMAppService works under ad-hoc (no LaunchAgent needed); notifications grant; Keychain does NOT re-prompt across rebuilds (docs corrected); Gatekeeper exceptions are **per-build**, so every browser-downloaded update needs a fresh approval; App Translocation observed twice on real launches. |
+| 2026-09-24 | 3 | Wave A merged (keychain, settings, rate, balance): 12 files, 150 tests in 25 suites, lint clean. Quit affordance added. Settings-test preference residue reduced from one file per run to exactly one. |

@@ -8,21 +8,23 @@ import Testing
 /// instead of silently resetting every user's settings.
 private let settingsKey = "io.github.genoma.deeptally.settings"
 
-@Suite("App settings")
+@Suite("App settings", .serialized)
 struct SettingsTests {
-  /// Runs `body` against a `UserDefaults` suite nobody else uses and removes the suite before
-  /// returning: the tests never read the developer's real preferences.
+  /// Runs `body` against one stable `UserDefaults` suite that only these tests use, so the developer's
+  /// real preferences are never touched. The suite is `.serialized`, which is what makes a single
+  /// shared domain safe.
   ///
-  /// `removePersistentDomain` empties the domain, but macOS's preferences daemon still keeps an
-  /// empty `~/Library/Preferences/<suite>.plist` for any domain it has seen — deleting that file
-  /// does not help, the daemon writes it back. Hence one throwaway domain per **run**, never a name
-  /// that a later run would read again.
+  /// `removePersistentDomain` empties the domain, but macOS's preferences daemon keeps a 42-byte empty
+  /// `~/Library/Preferences/<suite>.plist` for any domain it has seen, and deleting that file by hand
+  /// does not help — the daemon writes it back within seconds. A stable name keeps that residue at
+  /// exactly one file instead of one file per test run, which is why this is not randomised.
   private func withIsolatedDefaults(_ body: (UserDefaults) -> Void) {
-    let suiteName = "io.github.genoma.deeptally.tests.settings.\(UUID().uuidString)"
+    let suiteName = "io.github.genoma.deeptally.tests.settings"
     guard let defaults = UserDefaults(suiteName: suiteName) else {
       Issue.record("could not create the UserDefaults suite \(suiteName)")
       return
     }
+    defaults.removePersistentDomain(forName: suiteName)  // start clean even after a crashed run
     defer { defaults.removePersistentDomain(forName: suiteName) }
     body(defaults)
   }

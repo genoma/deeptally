@@ -7,6 +7,14 @@ public struct ModelRate: Sendable, Equatable {
   public let cacheHit: Decimal
   public let cacheMiss: Decimal
   public let output: Decimal
+
+  /// Public so the app target can build previews and fixtures without testability access.
+  public init(model: String, cacheHit: Decimal, cacheMiss: Decimal, output: Decimal) {
+    self.model = model
+    self.cacheHit = cacheHit
+    self.cacheMiss = cacheMiss
+    self.output = output
+  }
 }
 
 /// What the account is paying right now: the window in the user's local time, when it ends, and
@@ -30,6 +38,27 @@ public struct RateNowDisplay: Sendable, Equatable {
   public let nextTransitionLocal: String
   /// The effective prices of the current period, one row per model in table order.
   public let models: [ModelRate]
+
+  /// Public so the app target can build previews and fixtures without testability access.
+  public init(
+    periodLabel: String,
+    multiplierLabel: String,
+    isHoliday: Bool,
+    holidayNote: String?,
+    windowEndsLocal: String,
+    countdown: String,
+    nextTransitionLocal: String,
+    models: [ModelRate]
+  ) {
+    self.periodLabel = periodLabel
+    self.multiplierLabel = multiplierLabel
+    self.isHoliday = isHoliday
+    self.holidayNote = holidayNote
+    self.windowEndsLocal = windowEndsLocal
+    self.countdown = countdown
+    self.nextTransitionLocal = nextTransitionLocal
+    self.models = models
+  }
 }
 
 /// Renders "what am I paying right now?" for one price table.

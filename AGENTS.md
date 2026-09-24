@@ -169,6 +169,11 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
     and the shipped bundle is still `DeepTally.app`.
 11. DeepSeek pricing is volatile (model retirements and renames happened three times in 2026) — never
     hardcode model IDs or prices in Swift; load them from the versioned table.
+12. `UserDefaults(suiteName:)` leaves a 42-byte empty plist in `~/Library/Preferences` for every domain a
+    process has seen, and deleting the file does not help — `cfprefsd` writes it back. Test suites must use
+    **one stable domain** (see `Tests/DeepTallyCoreTests/SettingsTests.swift`) rather than a UUID per test,
+    or a run leaves residue that accumulates forever. That suite is marked `.serialized` so a single shared
+    domain is safe.
 
 ## 10. Definition of done
 
