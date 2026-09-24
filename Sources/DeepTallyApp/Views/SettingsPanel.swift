@@ -85,25 +85,46 @@ struct SettingsPanel: View {
     }
   }
 
+  /// Only the balance has a value to show: today's spend and the cache-hit rate need the ledger. They
+  /// stay listed instead of disappearing, but disabled and labelled with what they wait for — a picker
+  /// option that silently does nothing is worse than a disabled one that explains itself.
   private var metricRow: some View {
-    labeledRow("Menu bar") {
-      Picker("Menu bar metric", selection: $settings.menuBarMetric) {
-        ForEach(MenuBarMetric.allCases, id: \.self) { metric in
-          Text(Self.label(for: metric)).tag(metric)
+    VStack(alignment: .leading, spacing: 4) {
+      labeledRow("Menu bar") {
+        Picker("Menu bar metric", selection: $settings.menuBarMetric) {
+          ForEach(MenuBarMetric.allCases, id: \.self) { metric in
+            Text(Self.label(for: metric))
+              .tag(metric)
+              .disabled(Self.needsLedger(metric))
+          }
         }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .fixedSize()
+        .accessibilityLabel("Menu bar metric")
       }
-      .labelsHidden()
-      .pickerStyle(.menu)
-      .fixedSize()
-      .accessibilityLabel("Menu bar metric")
+      Text(Self.ledgerNote)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+  }
+
+  private static let ledgerNote = "Today's spend and cache-hit rate need the ledger (Step 4)."
+
+  /// Which metrics have a number behind them. Only the balance does until Step 4 lands the ledger.
+  private static func needsLedger(_ metric: MenuBarMetric) -> Bool {
+    switch metric {
+    case .balance: return false
+    case .todaySpend, .cacheHitRate: return true
     }
   }
 
   private static func label(for metric: MenuBarMetric) -> String {
     switch metric {
     case .balance: return "Balance"
-    case .todaySpend: return "Today's spend"
-    case .cacheHitRate: return "Cache-hit rate"
+    case .todaySpend: return "Today's spend (Step 4)"
+    case .cacheHitRate: return "Cache-hit rate (Step 4)"
     }
   }
 
