@@ -16,17 +16,27 @@ The app target is `DeepTallyApp`, not `DeepTally`: SwiftPM product names must di
 case because APFS is case-insensitive, and `DeepTally` vs `deeptally` collided at link time. For the same
 reason the CLI target declares an explicit `path: Sources/DeepTallyCLI` ([`../AGENTS.md`](../AGENTS.md) §9.10).
 
-Current status (end of Step 1): `DeepTallyCore` types + `DeepSeekClient`, the `NSStatusItem` app shell, the
-CLI and the test target exist. Pricing, usage/SSE parsing, the opencode importer, the ledger and the
-analytics views land in Steps 1 (parallel lanes), 4 and 5.
+Current status (end of Step 3): `DeepTallyCore` is complete for Step 3 (types, client, keychain, settings,
+balance, rate, pricing, opencode import) and `DeepTallyApp` is wired end to end — composition root, state
+owner, popover, login item, notifications. The ledger, the analytics views and the CLI's `usage` command are
+Steps 4–5; `deeptally usage` is still a stub. What the app does for a user is in [`USAGE.md`](USAGE.md).
 
 ## Data flow
 
 ```
-DeepSeek API ──balance──┐
-                        ├──> BalanceService ──> MenuBarLabel + Popover
-usage sources:          │
-  opencode.db ──import──┤
+DeepSeek API ──balance──> DeepSeekClient ──> BalanceMonitor ──> AppModel ──┬──> StatusItemController
+                        (one per refresh,                                 │        (menu bar title)
+                         bound to the key)                               │
+                                                                         └──> PopoverView
+                                                                              ├─ StatusBanner ×n
+                                                                              ├─ BalanceSection
+                                                                              ├─ RateNowPanel
+                                                                              ├─ login item toggle
+                                                                              ├─ SettingsPanel
+                                                                              └─ Quit + key origin
+
+usage sources (Step 4):
+  opencode.db ──import──┐
   loopback proxy (1.1) ─┼──> LedgerStore (SQLite) ──> CostEngine ──> Analytics views
   CSV import ───────────┘         ▲                      ▲
                                   │                      │
@@ -35,7 +45,8 @@ usage sources:          │
 
 Balance and usage are deliberately separate paths. The balance comes from the account and is authoritative
 but eventually consistent; usage comes from local sources and is the only way to see history, because
-DeepSeek has no historical usage API.
+DeepSeek has no historical usage API. The rate-now panel reads the price table directly — no network, no
+ledger.
 
 ## Menu bar and lifecycle
 
@@ -46,6 +57,52 @@ disables the item in Control Center → Menu Bar ([`../AGENTS.md`](../AGENTS.md)
 
 One related macOS 27 trap: `NSMenu` hides item symbol images by default. When menus are added, use
 `labelStyle(.titleOnly)` or set `preferredImageVisibility` explicitly ([`../AGENTS.md`](../AGENTS.md) §9.8).
+
+### How the app target is assembled
+
+`AppEnvironment` is the **single composition point**. It is built once, at launch, and holds the collaborators
+both the model and the views need, so neither has to know how a key source, a price table or a holiday
+calendar is put together — and there is exactly one place where those choices are made:
+
+- `KeychainStore` + `APIKeySource` (Keychain first, then `DEEPSEEK_API_KEY`) and the `KeychainStore` itself,
+  so the app can report *where* a key came from without reading it;
+- `SettingsStore` and `LaunchStateStore` (the last reading and the last alert time);
+- the price table, the merged holiday calendar, `PeakOffPeakEngine` and `RateNowPresenter`;
+- `makeClient`, which binds one `DeepSeekClient` to the key a refresh resolved, so a re-imported key takes
+effect on the next request instead of being captured at launch.
+
+Composing is **fail-soft**: an unreadable price table or holiday file is recorded as a sentence for the
+popover's banner slot and that part falls back (`PriceTable.unavailable`, an empty calendar) rather than
+stopping the app. Monitor and notification policy are built *for* a threshold and a cooldown, so a settings
+change gets a fresh object instead of an object holding the old value.
+
+`AppModel` is the **state owner**. It is `@MainActor @Observable` and owns the key origin, the balance state,
+the rate-now display, the login-item status and the banner list derived from all of them. Three rules it
+keeps: a refresh never runs twice at once; the next refresh always comes from `PollingPlan` (interval, then
+backoff, then additive jitter) rather than a hand-rolled timer chain; nothing blocking runs on the main
+actor (the one blocking call, the key import's shell, runs in a detached task). It re-renders the countdown
+on a 30-second ticker, refreshes on `NSWorkspace.didWakeNotification` and on the unsatisfied → satisfied
+edge of `NWPathMonitor`, and posts low-balance alerts through `NotificationPolicy`.
+
+`StatusItemController` owns the `NSStatusItem` and the `NSPopover` and mirrors `AppModel.menuBarLabel` through
+Observation, so the title follows a refresh the model started on its own timer.
+
+`LoginItem` and `UserNotificationScheduler` are **thin system wrappers**. `LoginItem` folds
+`SMAppService.Status` into one enum and adds a sentence for a failure. There is deliberately **no LaunchAgent
+fallback**: an integration spike measured `SMAppService.mainApp.register()` succeeding for an ad-hoc-signed
+bundle with no approval prompt ([`SPIKES.md`](SPIKES.md) S3), so a fallback would be dead code — it is only
+needed if a future macOS changes that. `UserNotificationScheduler` is the only type that touches
+`UNUserNotificationCenter`; a denial is a normal outcome, not an error path (the popover's own low-balance
+notice is the fallback), and a notification carries the amount and threshold, never a key.
+
+The `Views/` directory and `PopoverView` are **presentation only**: they read state and call closures, run no
+shell, open no Keychain item and know no key. Strings arrive ready to place from the `DeepTallyCore`
+presenters (`BalanceMonitor`, `RateNowPresenter`), and prices are never hardcoded in the UI. Previews use
+`PreviewProvider` structs, because `#Preview` cannot compile under Command Line Tools
+([`../AGENTS.md`](../AGENTS.md) §9.13, [`DEVELOPMENT.md`](DEVELOPMENT.md)).
+
+`Spikes.swift` and `LaunchLog.swift` are the Step 2 measurement commands (`--spike …`) and the optional launch
+log. They exit before any UI exists and are not on the normal app path ([`SPIKES.md`](SPIKES.md)).
 
 ## The ledger
 
@@ -118,14 +175,25 @@ shows "what am I paying right now" instead of a static price list.
 
 | Path | Contents |
 |---|---|
-| `Sources/DeepTallyCore/Types.swift` | `UsageSource`, `Provider`, balance types, `Decimal.parse` |
-| `Sources/DeepTallyCore/API/DeepSeekClient.swift` | Balance and models HTTP client (the only network code so far) |
-| `Sources/DeepTallyCore/Resources/PriceTable.json` | Versioned price data |
-| `Sources/DeepTallyApp/` | `main.swift`, `AppDelegate`, `AppModel`, `StatusItemController`, `PopoverView` |
-| `Sources/DeepTallyCLI/main.swift` | The `deeptally` CLI |
+| `Sources/DeepTallyCore/Types.swift` | `UsageSource`, `Provider`, balance types, `PriceTable`, `Decimal.parse` |
+| `Sources/DeepTallyCore/API/DeepSeekClient.swift` | Balance and models HTTP client (the only network code) |
+| `Sources/DeepTallyCore/Security/` | `KeychainStore` (one generic-password item) and `APIKeySource` (Keychain → environment, one-time shell import) |
+| `Sources/DeepTallyCore/Balance/` | `BalanceMonitor`, `PollingPlan`, `NotificationPolicy` — pure logic, no timers |
+| `Sources/DeepTallyCore/Settings/` | `AppSettings` (defaults + clamped ranges) and `SettingsStore` |
+| `Sources/DeepTallyCore/Pricing/` | `PriceTableLoader` (bundled + user override), `HolidayCalendar`, `PeakOffPeakEngine`, `CostEngine` |
+| `Sources/DeepTallyCore/Rate/RateNowPresenter.swift` | "What am I paying right now", formatted for the injected time zone |
+| `Sources/DeepTallyCore/Import/OpenCodeImporter.swift` | Read-only opencode import; the ledger wires it up in Step 4 |
+| `Sources/DeepTallyCore/Resources/` | `PriceTable.json` and `ChinaHolidays.json` — versioned data, not code |
+| `Sources/DeepTallyApp/AppEnvironment.swift` | The composition root (and `LaunchStateStore`) |
+| `Sources/DeepTallyApp/AppModel.swift` | State owner: key origin, polling, refresh, banners |
+| `Sources/DeepTallyApp/Views/`, `PopoverView.swift` | Presentation only |
+| `Sources/DeepTallyApp/LoginItem.swift`, `UserNotificationScheduler.swift` | Thin system wrappers |
+| `Sources/DeepTallyApp/StatusItemController.swift`, `AppDelegate.swift`, `main.swift` | Status item + popover, lifecycle, entry point |
+| `Sources/DeepTallyApp/Spikes.swift`, `LaunchLog.swift` | Step 2 measurement commands; not on the normal app path |
+| `Sources/DeepTallyCLI/Commands.swift` | The `deeptally` command set |
 | `Tests/DeepTallyCoreTests/` | swift-testing suites; fixtures only, never the network |
-| `Scripts/bundle.sh` | Hand-assembles `dist/DeepTally.app` and ad-hoc signs it |
+| `Scripts/bundle.sh`, `Scripts/dmg.sh` | Hand-assembled bundle and DMG |
 
-Planned modules (`Pricing/`, `Import/`, the ledger store) live under `DeepTallyCore` as they land, so the
-CLI and the app share exactly the same engine. See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the build/test
-workflow, and [`PLAN.md`](PLAN.md) for the step-by-step.
+Planned modules (the ledger store and the analytics views) live under `DeepTallyCore` as they land, so the CLI
+and the app share exactly the same engine. See [`DEVELOPMENT.md`](DEVELOPMENT.md) for the build/test
+workflow, [`USAGE.md`](USAGE.md) for the user-facing behaviour, and [`PLAN.md`](PLAN.md) for the step-by-step.
