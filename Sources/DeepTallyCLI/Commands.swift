@@ -2,6 +2,55 @@
 import DeepTallyCore
 import Foundation
 
+// MARK: - Import instrumentation
+
+/// The importer, plus which of the rows it offered the price table cannot price.
+///
+/// The costing closure alone cannot answer that: `OpenCodeImporter` calls it for every candidate row,
+/// including the ones the union dedupes and the ones the watermark filter then drops, so counting
+/// there over-reports. This wrapper inspects exactly the records `importAll(since:)` offered, which is
+/// what "offered" means everywhere else in this command.
+///
+/// A class, not a struct: ``LedgerSync`` holds the source as `any UsageImporting`, and the counters
+/// have to survive that copy for the caller to read them afterwards.
+///
+/// Internal rather than private so `DeepTallyCLITests` can prove the counters describe offered rows
+/// and not scanned candidates.
+final class PricingCoverage: UsageImporting {
+  private let wrapped: any UsageImporting
+  private let table: PriceTable
+
+  private var unpricedRows = 0
+  private var unpricedModels: Set<String> = []
+
+  init(wrapping wrapped: any UsageImporting, table: PriceTable) {
+    self.wrapped = wrapped
+    self.table = table
+  }
+
+  var source: UsageSource { wrapped.source }
+
+  func importAll(since: Date?) throws -> OpenCodeImporter.ImportResult {
+    let result = try wrapped.importAll(since: since)
+    for imported in result.records where table.price(forModel: imported.record.model) == nil {
+      unpricedRows += 1
+      unpricedModels.insert(imported.record.model)
+    }
+    return result
+  }
+
+  /// One stderr line when offered rows used a model the table cannot price, or `nil` when every row
+  /// had a price. A cost of zero is otherwise indistinguishable from a genuinely free model, and a
+  /// later import does not repair a row the ledger already has.
+  var warning: String? {
+    guard unpricedRows > 0 else { return nil }
+    let models = unpricedModels.sorted().joined(separator: ", ")
+    let verb = unpricedRows == 1 ? "row uses" : "rows use"
+    return "warning: \(unpricedRows) offered \(verb) a model the price table does not list"
+      + " (\(models)); they were recorded with a cost of 0."
+  }
+}
+
 // MARK: - Command-line contract
 
 /// Process exit codes. Contractual for scripts: 0 success, 2 a missing or unusable key, 1 a usage
@@ -31,24 +80,41 @@ enum CLI {
     USAGE:
       deeptally balance            Show the account balance
       deeptally rate               Show the peak/off-peak window in force and its prices
+      deeptally usage [--json] [--days N]
+                                   Spend, requests, tokens and cache-hit rate for today, the
+                                   last 7 days and the last 30 days, then per model
+      deeptally import [--full]    Import local opencode usage into the ledger
+      deeptally ledger export <path.csv>
+                                   Write every raw ledger row as CSV
+      deeptally ledger prune --days N
+                                   Delete raw rows older than N days (the rollups are kept)
+      deeptally ledger reprice [--json]
+                                   Re-price every stored row with the current price table
       deeptally key status         Show which store supplies the API key
       deeptally key import         Store the key from the login shell in the Keychain
       deeptally key delete         Remove the stored key from the Keychain
-      deeptally usage [--json]     Usage summary (lands in Step 4)
-      deeptally ledger reprice     Re-price every stored row with the current price table
       deeptally --version          Print version
       deeptally --help             This help
 
     OPTIONS:
-      --json                       Machine-readable output (`usage`, `ledger reprice`)
       --shell zsh|bash             Login shell for `key import` (default: zsh)
+      --json                       `usage` and `ledger reprice`: machine-readable output
+      --days N                     `usage`: per-model window of N local days ending today
+                                   `ledger prune`: delete raw rows older than N days
+      --full                       `import`: rescan opencode from the beginning (repair pass)
+
+    LEDGER:
+      ~/Library/Application Support/DeepTally/ledger.sqlite, shared with the app. Days are local
+      days on your clock; every row keeps the peak/off-peak price in force at its own instant.
 
     KEY:
       Read from the Keychain first, then from DEEPSEEK_API_KEY. Import it once with:
         deeptally key import --shell zsh
 
     EXIT CODES:
-      0 ok, 2 no usable key, 1 usage error or any other failure
+      0 ok — including `import` with no opencode database, which is not an error
+      2 no usable key
+      1 a usage error or any other failure
     """
 
   /// Runs one invocation and returns the process exit code. Failures go to stderr here, so exactly
@@ -86,6 +152,7 @@ enum CLI {
     case "rate": try rate(rest)
     case "key": try key(rest)
     case "usage": try usage(rest, ledgerURL: ledgerURL)
+    case "import": try importOpencode(rest, ledgerURL: ledgerURL)
     case "ledger": try ledger(rest, ledgerURL: ledgerURL)
     case "--version", "version": print("deeptally \(version)")
     case "--help", "-h": print(usageText)
@@ -165,8 +232,8 @@ enum CLI {
   }
 
   /// The price table and holiday calendar every command that prices something works from: the shipped
-  /// file (or a valid user override) plus the merged State Council calendar. One place, so `rate`, the
-  /// `usage` warning and `ledger reprice` cannot disagree about what a model costs.
+  /// file (or a valid user override) plus the merged State Council calendar. One place, so `rate`,
+  /// `import`, the `usage` warning and `ledger reprice` cannot disagree about what a model costs.
   static func pricing() throws -> (table: PriceTable, calendar: HolidayCalendar) {
     do {
       let table = try PriceTableLoader().load()
@@ -337,9 +404,188 @@ enum CLI {
     }
   }
 
+  // MARK: - usage
+
+  /// `deeptally usage [--json] [--days N]`.
+  ///
+  /// Every window is a run of **local** days ending today, built here with `Calendar.current` and
+  /// asked of the ledger as a `ts` range — never read out of the UTC-keyed `daily` rollups, which
+  /// would be off by a day for every user not on UTC. Queries are read-only: an empty ledger answers
+  /// with zeros and a hint, not an error.
+  ///
+  /// The unpriced-model warning from the Step-1 stub survives the real windows: a row the price table
+  /// cannot price is the one thing a summary must not hide behind a zero, so plain output still
+  /// prints it after the report, and `--json` sends it to stderr so stdout stays one JSON document.
+  private static func usage(_ arguments: [String], ledgerURL: URL) throws {
+    let options: UsageOptions
+    do {
+      options = try UsageOptions.parse(arguments)
+    } catch let error as OptionError {
+      throw CommandFailure(
+        message: "deeptally usage: \(error.sentence).\n\(usageUsage)", code: .failure)
+    }
+
+    // One instant for every boundary, so the three windows cannot disagree across midnight.
+    let now = Date()
+    let report = try buildUsageReport(
+      ledger: try openLedger(ledgerURL),
+      days: options.days,
+      now: now,
+      calendar: .current,
+      timeZone: .current)
+    if options.json {
+      print(try report.jsonText())
+    } else {
+      print(report.humanText())
+    }
+    if let warning = try unpricedWarning(ledgerURL: ledgerURL) {
+      if options.json { writeToStandardError(warning) } else { print(warning) }
+    }
+  }
+
+  private static let usageUsage = "usage: deeptally usage [--json] [--days N]"
+
+  private static func buildUsageReport(
+    ledger: LedgerStore, days: Int, now: Date, calendar: Calendar, timeZone: TimeZone
+  ) throws -> UsageReport {
+    do {
+      let windows = try UsageWindows.headline(now: now, calendar: calendar).map {
+        try window(for: $0, ledger: ledger)
+      }
+      let chosen = UsageWindows.selected(days: days, now: now, calendar: calendar)
+      return UsageReport(
+        windows: windows,
+        selected: try window(for: chosen, ledger: ledger),
+        days: days,
+        generatedAt: now,
+        timeZone: timeZone,
+        currency: spendCurrency(),
+        ledgerRowCount: try rawRowCount(in: ledger),
+        ledgerPath: ledger.url.path)
+    } catch let error as LedgerError {
+      throw CommandFailure(message: "Could not read the ledger: \(describe(error))", code: .failure)
+    }
+  }
+
+  /// One window's totals, as the half-open `ts` range the ledger compares against.
+  private static func window(
+    for window: UsageWindow, ledger: LedgerStore
+  ) throws -> UsageReport.Window {
+    UsageReport.Window(
+      key: window.key,
+      label: window.label,
+      start: window.start,
+      end: window.end,
+      summary: try ledger.summary(since: window.start, until: window.end))
+  }
+
+  /// The price table's currency: the unit the ledger's amounts were priced in. Best effort — a
+  /// summary is not worth failing over a label, and USD is what the shipped table uses.
+  private static func spendCurrency() -> String {
+    guard let table = try? pricing().table else { return "USD" }
+    return table.currency
+  }
+
+  /// A short warning naming the models nothing can price, or `nil` when there is no ledger to look at
+  /// or nothing is missing. The cap is deliberate: a warning that lists thirty model ids is not a
+  /// warning, and `ledger reprice` prints all of them.
+  static func unpricedWarning(ledgerURL: URL) throws -> String? {
+    guard FileManager.default.fileExists(atPath: ledgerURL.path) else { return nil }
+    let store = try openLedger(ledgerURL)
+    let pricing = try pricing()
+    let engine = CostEngine(table: pricing.table, holidayCalendar: pricing.calendar)
+
+    let summary: UnpricedSummary
+    do {
+      summary = try store.unpricedSummary(costing: engine)
+    } catch let error as LedgerError {
+      throw CommandFailure(message: "Could not read the ledger: \(describe(error))", code: .failure)
+    }
+    guard summary.rowsUnpriced > 0 else { return nil }
+
+    let named = summary.models.prefix(3)
+      .map { "\($0.model) \(grouped($0.rows))" }
+      .joined(separator: ", ")
+    let remaining = max(0, summary.models.count - 3)
+    let more = remaining > 0 ? ", +\(remaining) more" : ""
+    return """
+      warning: \(grouped(summary.rowsUnpriced)) of \(grouped(summary.rowsExamined)) ledger rows have no price (\(named)\(more)).
+               Fix the price table, then run `deeptally ledger reprice`.
+      """
+  }
+
+  // MARK: - import
+
+  /// `deeptally import [--full]` — the shared incremental flow (``LedgerSync``) over opencode's local
+  /// database, with every row priced by the window in force at that row's own instant.
+  ///
+  /// A missing opencode database is a normal state, not a failure: someone who does not use opencode
+  /// still gets a definite answer and exit code 0. The ledger is created on demand at the URL the app
+  /// reads.
+  private static func importOpencode(_ arguments: [String], ledgerURL: URL) throws {
+    let options: ImportOptions
+    do {
+      options = try ImportOptions.parse(arguments)
+    } catch let error as OptionError {
+      throw CommandFailure(
+        message: "deeptally import: \(error.sentence).\n\(importCommandUsage)", code: .failure)
+    }
+
+    let databaseURL = OpenCodeImporter.standardDatabaseURL
+    guard FileManager.default.fileExists(atPath: databaseURL.path) else {
+      print("No opencode database at \(databaseURL.path) — nothing to import.")
+      print("That is expected if you do not use opencode; the ledger records opencode usage only.")
+      return
+    }
+
+    let pricing = try pricing()
+    let engine = CostEngine(table: pricing.table, holidayCalendar: pricing.calendar)
+    let coverage = PricingCoverage(
+      wrapping: OpenCodeImporter(databaseURL: databaseURL, costing: engine.cost(model:usage:at:)),
+      table: pricing.table)
+
+    let ledger = try openLedger(ledgerURL)
+    let sync = LedgerSync(ledger: ledger, source: coverage)
+    let outcome: LedgerSync.Outcome
+    do {
+      outcome = options.full ? try sync.fullResync() : try sync.sync()
+    } catch let error as OpenCodeImporter.ImportError {
+      throw importFailure(error, databaseURL: databaseURL)
+    } catch let error as LedgerError {
+      throw CommandFailure(
+        message: "Could not write to the ledger: \(describe(error))", code: .failure)
+    }
+
+    let scan = options.full ? "full resync" : "incremental scan"
+    print("Imported \(insertedRows(outcome.inserted)) of \(outcome.offered) offered (\(scan)).")
+    if outcome.inserted == 0 {
+      print("  nothing new: the ledger already holds every row opencode offered.")
+    }
+    print("  watermark: \(watermarkText(outcome.watermark))")
+    print("  ledger:    \(ledger.url.path)")
+    if let warning = coverage.warning {
+      writeToStandardError(warning)
+    }
+  }
+
+  private static let importCommandUsage = "usage: deeptally import [--full]"
+
+  /// `N new rows`, `1 new row`: the count is the first thing the command reports, so it should read as
+  /// a sentence rather than as a number glued to a noun.
+  private static func insertedRows(_ count: Int) -> String {
+    "\(count) new \(count == 1 ? "row" : "rows")"
+  }
+
+  /// The watermark in force after the import, at the millisecond resolution the ledger stores: it is
+  /// the instant the next incremental scan resumes after, so it is shown exactly, not rounded.
+  private static func watermarkText(_ watermark: Date?) -> String {
+    guard let watermark else { return "none (no rows have been imported)" }
+    return Timestamps.utc(watermark, fractionalSeconds: true)
+  }
+
   // MARK: - ledger
 
-  private static let ledgerUsage = "usage: deeptally ledger reprice [--json]"
+  private static let ledgerUsage = "usage: deeptally ledger <export|prune|reprice>"
 
   private static func ledger(_ arguments: [String], ledgerURL: URL) throws {
     guard let subcommand = arguments.first else {
@@ -347,12 +593,59 @@ enum CLI {
     }
     let rest = Array(arguments.dropFirst())
     switch subcommand {
+    case "export": try ledgerExport(rest, ledgerURL: ledgerURL)
+    case "prune": try ledgerPrune(rest, ledgerURL: ledgerURL)
     case "reprice": try ledgerReprice(rest, ledgerURL: ledgerURL)
     default:
       throw CommandFailure(
         message: "Unknown ledger subcommand \"\(subcommand)\".\n\(ledgerUsage)", code: .failure)
     }
   }
+
+  /// `deeptally ledger export <path.csv>` — the CSV `LedgerStore` writes, oldest row first, plus the
+  /// row count. A `~` is expanded here because the shell does that only for an unquoted argument.
+  private static func ledgerExport(_ arguments: [String], ledgerURL: URL) throws {
+    guard arguments.count == 1, let path = arguments.first else {
+      throw CommandFailure(
+        message: "deeptally ledger export: expected one file path.\n\(ledgerExportUsage)",
+        code: .failure)
+    }
+    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+    let ledger = try openLedger(ledgerURL)
+    do {
+      try ledger.exportCSV(to: url)
+      print("Exported \(rawRows(try rawRowCount(in: ledger))) to \(url.path).")
+    } catch let error as LedgerError {
+      throw CommandFailure(
+        message: "Could not export the ledger: \(describe(error))", code: .failure)
+    }
+  }
+
+  /// `deeptally ledger prune --days N`. Only raw rows go: the UTC `daily` rollups derived from them
+  /// are kept, so the totals a pruned day contributed survive (`LedgerStore.pruneRawRequests`).
+  private static func ledgerPrune(_ arguments: [String], ledgerURL: URL) throws {
+    let options: PruneOptions
+    do {
+      options = try PruneOptions.parse(arguments)
+    } catch let error as OptionError {
+      throw CommandFailure(
+        message: "deeptally ledger prune: \(error.sentence).\n\(ledgerPruneUsage)", code: .failure)
+    }
+    let ledger = try openLedger(ledgerURL)
+    let removed: Int
+    do {
+      removed = try ledger.pruneRawRequests(olderThanDays: options.days)
+    } catch let error as LedgerError {
+      throw CommandFailure(
+        message: "Could not prune the ledger: \(describe(error))", code: .failure)
+    }
+    print(
+      "Pruned \(rawRows(removed)) older than \(options.days) days;"
+        + " the daily rollups were kept.")
+  }
+
+  private static let ledgerExportUsage = "usage: deeptally ledger export <path.csv>"
+  private static let ledgerPruneUsage = "usage: deeptally ledger prune --days N"
 
   /// `deeptally ledger reprice [--json]` — recompute every stored cost with the current price table.
   ///
@@ -471,49 +764,7 @@ enum CLI {
     }
   }
 
-  // MARK: - usage
-
-  /// The ledger lands in Step 4; until then this is the stub it always was, plus the one thing a user
-  /// should not have to run a separate command to discover: rows the current price table cannot price.
-  private static func usage(_ arguments: [String], ledgerURL: URL) throws {
-    switch arguments {
-    case []:
-      print("Usage summary lands in Step 4 (see docs/PLAN.md).")
-      if let warning = try unpricedWarning(ledgerURL: ledgerURL) { print(warning) }
-    case ["--json"]:
-      print(#"{"status":"not_implemented","step":4}"#)
-    default:
-      throw CommandFailure(message: "usage: deeptally usage [--json]", code: .failure)
-    }
-  }
-
-  /// A short warning naming the models nothing can price, or `nil` when there is no ledger to look at
-  /// or nothing is missing. The cap is deliberate: a warning that lists thirty model ids is not a
-  /// warning, and `ledger reprice` prints all of them.
-  static func unpricedWarning(ledgerURL: URL) throws -> String? {
-    guard FileManager.default.fileExists(atPath: ledgerURL.path) else { return nil }
-    let store = try openLedger(ledgerURL)
-    let pricing = try pricing()
-    let engine = CostEngine(table: pricing.table, holidayCalendar: pricing.calendar)
-
-    let summary: UnpricedSummary
-    do {
-      summary = try store.unpricedSummary(costing: engine)
-    } catch let error as LedgerError {
-      throw CommandFailure(message: "Could not read the ledger: \(describe(error))", code: .failure)
-    }
-    guard summary.rowsUnpriced > 0 else { return nil }
-
-    let named = summary.models.prefix(3)
-      .map { "\($0.model) \(grouped($0.rows))" }
-      .joined(separator: ", ")
-    let remaining = max(0, summary.models.count - 3)
-    let more = remaining > 0 ? ", +\(remaining) more" : ""
-    return """
-      warning: \(grouped(summary.rowsUnpriced)) of \(grouped(summary.rowsExamined)) ledger rows have no price (\(named)\(more)).
-               Fix the price table, then run `deeptally ledger reprice`.
-      """
-  }
+  // MARK: - Ledger plumbing
 
   /// Opens the ledger, mapping the store's typed failures to one sentence. The messages are built
   /// from paths, SQL contexts and sqlite's own diagnostics, none of which carry measured data.
@@ -525,6 +776,18 @@ enum CLI {
     } catch {
       throw CommandFailure(message: "Could not open the ledger.", code: .failure)
     }
+  }
+
+  /// How many raw rows the ledger holds. The store has no row-count API and `exportCSV(to:)` returns
+  /// nothing, so this sums the per-model `COUNT(*)` a summary carries: the same number, without a
+  /// second SQL implementation in the CLI.
+  private static func rawRowCount(in ledger: LedgerStore) throws -> Int {
+    try ledger.summary(since: .distantPast, until: .distantFuture).requestCount
+  }
+
+  /// `0 raw rows`, `1 raw row`.
+  private static func rawRows(_ count: Int) -> String {
+    "\(count) raw \(count == 1 ? "row" : "rows")"
   }
 
   /// `LedgerError` as a sentence. The CSV line number is the one a text editor shows.
@@ -554,27 +817,33 @@ enum CLI {
     }
   }
 
-  /// Money as text: six decimals, POSIX locale, no grouping. Six decimals is the ledger's own
-  /// resolution (micro-USD), so no amount rounds on its way to the screen, and the plain report and
-  /// the JSON say the same digits.
-  static func money(_ amount: Decimal) -> String {
-    let formatter = NumberFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.numberStyle = .decimal
-    formatter.usesGroupingSeparator = false
-    formatter.minimumFractionDigits = 6
-    formatter.maximumFractionDigits = 6
-    return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "\(amount)"
+  /// An `OpenCodeImporter.ImportError` as a sentence. A database that disappeared between the check
+  /// and the scan gets the same answer as no database at all: one line and exit 0.
+  private static func importFailure(
+    _ error: OpenCodeImporter.ImportError, databaseURL: URL
+  ) -> CommandFailure {
+    switch error {
+    case .databaseMissing:
+      return CommandFailure(
+        message: "No opencode database at \(databaseURL.path) — nothing to import.", code: .ok)
+    case .databaseUnusable(let reason):
+      return CommandFailure(
+        message: "Could not read opencode's database: \(sentence(reason))", code: .failure)
+    case .databaseBusy:
+      return CommandFailure(
+        message: "opencode's database is locked by a running opencode; try again in a moment.",
+        code: .failure)
+    case .unsupportedSchema(let reason):
+      return CommandFailure(
+        message: "opencode's database schema is not one this build knows: \(sentence(reason))",
+        code: .failure)
+    }
   }
 
-  /// Row counts as text, grouped for a human and pinned to a POSIX locale so the same ledger prints
-  /// the same bytes on every machine.
-  static func grouped(_ value: Int) -> String {
-    let formatter = NumberFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.numberStyle = .decimal
-    formatter.usesGroupingSeparator = true
-    return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+  /// A fragment from sqlite or Foundation as an ended sentence: those messages often carry their own
+  /// period, and `…doesn’t exist..` is exactly the kind of double punctuation that reads as a bug.
+  private static func sentence(_ fragment: String) -> String {
+    fragment.hasSuffix(".") ? fragment : fragment + "."
   }
 
   // MARK: - Shared
@@ -597,6 +866,53 @@ enum CLI {
   }
 
   private static let skPrefix = "sk-"
+
+  /// The CLI's one exact-money formatter: six decimals, POSIX locale, no grouping. Six decimals is
+  /// the ledger's own resolution (micro-USD), so no amount rounds on its way to the screen, and the
+  /// plain and JSON reports say the same digits. Every money string in the CLI comes from here or
+  /// from ``displayMoney(_:currency:)``, never from a second implementation.
+  static func money(_ amount: Decimal) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = false
+    formatter.minimumFractionDigits = 6
+    formatter.maximumFractionDigits = 6
+    return formatter.string(from: NSDecimalNumber(decimal: amount)) ?? "\(amount)"
+  }
+
+  /// The CLI's one grouped-count formatter: `5,275`, pinned to a POSIX locale so the same ledger
+  /// prints the same bytes on every machine.
+  static func grouped(_ value: Int) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = true
+    return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
+  }
+
+  /// The CLI's one human-money formatter: the account currency's own symbol, two decimals, widened
+  /// to four when a small amount needs them, so `$0.0012` does not print as `$0.00`. The currency is
+  /// shown as-is and never converted, mapped exactly as `BalanceMonitor` maps it; an unknown code is
+  /// its own prefix.
+  static func displayMoney(_ amount: Decimal, currency: String) -> String {
+    switch currency {
+    case "USD": return "$" + displayAmount(amount)
+    case "CNY": return "¥" + displayAmount(amount)
+    default: return currency + " " + displayAmount(amount)
+    }
+  }
+
+  private static func displayAmount(_ value: Decimal) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = false
+    formatter.minimumFractionDigits = 2
+    formatter.maximumFractionDigits = 4
+    formatter.roundingMode = .halfUp
+    return formatter.string(from: value as NSDecimalNumber) ?? "\(value)"
+  }
 
   /// A command that takes no arguments rejects them rather than ignoring them: a typo'd flag must
   /// not silently change what ran.
