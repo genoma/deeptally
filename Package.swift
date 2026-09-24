@@ -53,6 +53,19 @@ let package = Package(
                 ])
             ]
         ),
+        // Same reason as the app target, which this mirrors: `deeptally` is an executable, and SwiftPM
+        // links it into the test bundle in place, so the command surface, the ledger path and the
+        // reports are tested without extracting a library or duplicating a seam.
+        .testTarget(
+            name: "DeepTallyCLITests",
+            dependencies: ["deeptally", "DeepTallyCore"],
+            swiftSettings: [
+                .unsafeFlags([
+                    "-plugin-path",
+                    "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/testing",
+                ])
+            ]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
