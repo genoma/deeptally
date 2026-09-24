@@ -174,9 +174,14 @@ enum CLI {
         .merging(HolidayCalendar(source: "PriceTable.json", dates: table.holidays))
       return (table, calendar)
     } catch let error as PricingDataError {
-      throw CommandFailure(
-        message: "Could not load the pricing data: \(describe(error))", code: .failure)
+      throw CommandFailure(message: pricingFailureMessage(error), code: .failure)
     }
+  }
+
+  /// The failure `pricing()` reports. The sentence is ``PricingDataError/userFacingSentence``, the
+  /// same one the app banner shows, so the CLI cannot drift away from it.
+  static func pricingFailureMessage(_ error: PricingDataError) -> String {
+    "Could not load the pricing data: \(error.userFacingSentence)"
   }
 
   /// The rate display as text: a headline, three context lines, one line per model.
@@ -197,24 +202,6 @@ enum CLI {
       lines.append("    \(name)   \(hit)   \(miss)   \(output)")
     }
     return lines.joined(separator: "\n")
-  }
-
-  /// `PricingDataError` as a sentence. `detail` is kept: it names the offending field.
-  private static func describe(_ error: PricingDataError) -> String {
-    switch error {
-    case .resourceMissing(let name):
-      return "\(name) is missing or unreadable."
-    case .decodeFailed(let name, let detail):
-      return "\(name) is not valid JSON for its schema: \(detail)"
-    case .noModels:
-      return "the price table lists no models."
-    case .invalidOffPeakMultiplier(let value):
-      return "the off-peak multiplier \(value) is not in (0, 1]."
-    case .invalidPeakWindow(let start, let end):
-      return "the peak window \(start)-\(end) UTC is not a valid hour range."
-    case .duplicateAlias(let alias):
-      return "the alias \"\(alias)\" is listed on more than one model."
-    }
   }
 
   // MARK: - key

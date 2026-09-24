@@ -123,24 +123,12 @@ struct AppEnvironment: Sendable {
 
   // MARK: - Diagnostics
 
-  /// A `PricingDataError` as a plain sentence, the same shape `deeptally rate` prints. `detail` is
-  /// kept: it names the offending field.
+  /// A `PricingDataError` as the plain sentence its own type defines, so the app banner and
+  /// `deeptally rate` print the same words. `detail` is kept: it names the offending field. The
+  /// fallback keeps a non-pricing error readable rather than empty.
   private static func describe(_ error: any Error) -> String {
     guard let pricing = error as? PricingDataError else { return String(describing: error) }
-    switch pricing {
-    case .resourceMissing(let name):
-      return "\(name) is missing or unreadable."
-    case .decodeFailed(let name, let detail):
-      return "\(name) is not valid JSON for its schema: \(detail)"
-    case .noModels:
-      return "the price table lists no models."
-    case .invalidOffPeakMultiplier(let value):
-      return "the off-peak multiplier \(value) is not in (0, 1]."
-    case .invalidPeakWindow(let start, let end):
-      return "the peak window \(start)-\(end) UTC is not a valid hour range."
-    case .duplicateAlias(let alias):
-      return "the alias \"\(alias)\" is listed on more than one model."
-    }
+    return pricing.userFacingSentence
   }
 }
 
