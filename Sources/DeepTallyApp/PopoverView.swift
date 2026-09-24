@@ -95,6 +95,7 @@ struct PopoverView: View {
       isImportingKey: model.isImportingKey,
       importMessage: model.importMessage,
       alertsUnavailable: model.alertsUnavailable,
+      localUsageNote: model.localUsageNote,
       onImportFromShell: { model.importKey(from: $0) },
       onDeleteKey: { model.deleteKey() }
     )

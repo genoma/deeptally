@@ -16,6 +16,9 @@ struct SettingsPanel: View {
   /// Alerts are switched on but macOS reports them denied: the one calm line that says so, and what
   /// carries a low balance instead.
   private let alertsUnavailable: Bool
+  /// The one quiet line under the metric picker while local usage is not being imported, or `nil`
+  /// when it is. Never an error: the balance, the alerts and the rate panel are unaffected by it.
+  private let localUsageNote: String?
   private let onImportFromShell: (ShellKind) -> Void
   private let onDeleteKey: () -> Void
 
@@ -24,6 +27,7 @@ struct SettingsPanel: View {
     isImportingKey: Bool,
     importMessage: String?,
     alertsUnavailable: Bool = false,
+    localUsageNote: String? = nil,
     onImportFromShell: @escaping (ShellKind) -> Void,
     onDeleteKey: @escaping () -> Void
   ) {
@@ -31,6 +35,7 @@ struct SettingsPanel: View {
     self.isImportingKey = isImportingKey
     self.importMessage = importMessage
     self.alertsUnavailable = alertsUnavailable
+    self.localUsageNote = localUsageNote
     self.onImportFromShell = onImportFromShell
     self.onDeleteKey = onDeleteKey
   }
@@ -96,9 +101,8 @@ struct SettingsPanel: View {
     }
   }
 
-  /// Only the balance has a value to show: today's spend and the cache-hit rate need the ledger. They
-  /// stay listed instead of disappearing, but disabled and labelled with what they wait for — a picker
-  /// option that silently does nothing is worse than a disabled one that explains itself.
+  /// All three metrics have a number behind them: the balance from the API, today's spend and the
+  /// cache-hit rate from the app's own import of local usage.
   private var metricRow: some View {
     VStack(alignment: .leading, spacing: 4) {
       labeledRow("Menu bar") {
@@ -106,36 +110,34 @@ struct SettingsPanel: View {
           ForEach(MenuBarMetric.allCases, id: \.self) { metric in
             Text(Self.label(for: metric))
               .tag(metric)
-              .disabled(Self.needsLedger(metric))
           }
         }
         .labelsHidden()
         .pickerStyle(.menu)
         .fixedSize()
+        .help(Self.metricHelp)
         .accessibilityLabel("Menu bar metric")
       }
-      Text(Self.ledgerNote)
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
+      if let localUsageNote {
+        Text(localUsageNote)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+      }
     }
   }
 
-  private static let ledgerNote = "Today's spend and cache-hit rate need the ledger (Step 4)."
-
-  /// Which metrics have a number behind them. Only the balance does until Step 4 lands the ledger.
-  private static func needsLedger(_ metric: MenuBarMetric) -> Bool {
-    switch metric {
-    case .balance: return false
-    case .todaySpend, .cacheHitRate: return true
-    }
-  }
+  /// The windows are not visible in the labels, so the picker names them: "today" is the local day,
+  /// and the cache-hit rate is the trailing 30 days that ``LocalUsageLedger`` reads.
+  private static let metricHelp =
+    "Today's spend is today's local day, priced from the local usage ledger. Cache-hit rate covers "
+    + "the last 30 days."
 
   private static func label(for metric: MenuBarMetric) -> String {
     switch metric {
     case .balance: return "Balance"
-    case .todaySpend: return "Today's spend (Step 4)"
-    case .cacheHitRate: return "Cache-hit rate (Step 4)"
+    case .todaySpend: return "Today's spend"
+    case .cacheHitRate: return "Cache-hit rate"
     }
   }
 
@@ -264,6 +266,7 @@ struct SettingsPanelPreviews: PreviewProvider {
         isImportingKey: false,
         importMessage: nil,
         alertsUnavailable: true,
+        localUsageNote: "Local usage is not being imported yet.",
         onImportFromShell: { _ in },
         onDeleteKey: {}
       )

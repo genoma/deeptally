@@ -20,6 +20,21 @@ struct AppEnvironment: Sendable {
   /// secret: `hasItem()` answers existence only.
   let keychain: KeychainStore
 
+  /// The ledger file local usage is imported into and the menu-bar metrics are read from.
+  /// Injectable because the app-layer tests run the real import flow: they must point at a temporary
+  /// file rather than the developer's ledger.
+  let ledgerURL: URL
+  /// Where the opencode importer reads from, for the same reason: no app test may scan the
+  /// developer's 400 MB database.
+  let openCodeDatabaseURL: URL
+  /// Builds the importer one ledger pass uses, with the pricing that pass will store, or `nil` when
+  /// the price table could not be read — see ``makeLocalUsageLedger()`` for why importing is then
+  /// disabled. A closure because the importer is not `Sendable`; the ledger actor builds it, and the
+  /// costing it prices with is the one this closure captured, so the two can never disagree.
+  let makeUsageSource: (@Sendable () -> any UsageImporting)?
+  /// The timezone every local day boundary is computed with; see ``calendar``.
+  let timeZone: TimeZone
+
   let settingsStore: SettingsStore
   let launchState: LaunchStateStore
 
@@ -61,13 +76,18 @@ struct AppEnvironment: Sendable {
     makeFetcher: @escaping @Sendable (String) -> any BalanceFetching = { key in
       DeepSeekClient(keyProvider: { key })
     },
-    timeZone: TimeZone = .current
+    timeZone: TimeZone = .current,
+    ledgerURL: URL = LedgerStore.standardURL,
+    openCodeDatabaseURL: URL = OpenCodeImporter.standardDatabaseURL
   ) {
     self.keychain = keychain
     self.keySource = keySource ?? APIKeySource(keychain: keychain)
     self.makeFetcher = makeFetcher
     self.settingsStore = SettingsStore(defaults: defaults)
     self.launchState = LaunchStateStore(defaults: defaults)
+    self.ledgerURL = ledgerURL
+    self.openCodeDatabaseURL = openCodeDatabaseURL
+    self.timeZone = timeZone
 
     let table: PriceTable
     let tableProblem: String?
@@ -105,9 +125,22 @@ struct AppEnvironment: Sendable {
     self.priceOverrideProblem = overrideProblem
     self.holidayCalendar = calendar
     self.holidayCalendarProblem = calendarProblem
-    let engine = PeakOffPeakEngine(table: table, holidayCalendar: calendar)
-    self.peakOffPeak = engine
-    self.rateNow = RateNowPresenter(table: table, engine: engine, timeZone: timeZone)
+    // One peak/off-peak engine, shared by the rate panel and by costing, so the price a record is
+    // stored with cannot drift from the price the panel shows. Neither read of the table has a
+    // usable price when the table itself is unreadable; that is exactly when importing is disabled.
+    let costEngine = CostEngine(table: table, holidayCalendar: calendar)
+    // `nil` when the table is unreadable: no prices, so no import (see ``LocalUsageLedger``).
+    if tableProblem == nil {
+      self.makeUsageSource = { [openCodeDatabaseURL] in
+        OpenCodeImporter(
+          databaseURL: openCodeDatabaseURL, costing: costEngine.cost(model:usage:at:))
+      }
+    } else {
+      self.makeUsageSource = nil
+    }
+    self.peakOffPeak = costEngine.peakOffPeak
+    self.rateNow = RateNowPresenter(
+      table: table, engine: costEngine.peakOffPeak, timeZone: timeZone)
   }
 
   /// The balance monitor for one threshold. The stale-after window is app policy, the threshold is a
@@ -119,6 +152,26 @@ struct AppEnvironment: Sendable {
   /// The alert policy for one cooldown, for the same reason as ``balanceMonitor(lowBalanceThreshold:)``.
   func notificationPolicy(cooldownMinutes: Int) -> NotificationPolicy {
     NotificationPolicy(cooldown: TimeInterval(cooldownMinutes) * 60)
+  }
+
+  /// The local calendar every "today" and "last 30 days" boundary is computed with: the user's own
+  /// calendar, with the injected timezone. "Today" is a local day (docs/PLAN.md §4), and pinning
+  /// `timeZone` is what makes that boundary assertable in a test.
+  var calendar: Calendar {
+    var calendar = Calendar.current
+    calendar.timeZone = timeZone
+    return calendar
+  }
+
+  // MARK: - Local usage
+
+  /// The app's one ledger owner: the standard ledger file, the opencode importer, and the pricing
+  /// engine that prices each imported row at the row's own instant.
+  ///
+  /// Built here so neither the model nor a view knows how any of those three is assembled, and so
+  /// "no usable price table" turns into "no import" once, in one place.
+  func makeLocalUsageLedger() -> LocalUsageLedger {
+    LocalUsageLedger(ledgerURL: ledgerURL, makeSource: makeUsageSource)
   }
 
   // MARK: - Diagnostics

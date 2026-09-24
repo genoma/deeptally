@@ -105,18 +105,20 @@ struct AppModelSettingsTests {
     try await withIsolatedDefaults(Self.domain) { defaults in
       let fixture = makeFixture(defaults: defaults, outcome: .balance(usdBalance("12.34")))
       let model = fixture.model
-      model.refresh()
+      model.start(observingSystemEvents: false)
       await settleRefresh(model)
+      await waitUntil("the launch ledger pass") { model.localUsage != nil }
       #expect(model.menuBarLabel == "$12.34")
 
       model.settings.menuBarMetric = .todaySpend
-      // A number the app does not have is never shown: the ledger lands in Step 4.
-      #expect(model.menuBarLabel == "—")
-      #expect(model.menuBarPresentation.title == "—")
+      // The fixture's ledger is empty, so today's spend is a real zero rather than a missing number.
+      #expect(model.menuBarLabel == "$0.00")
+      #expect(model.menuBarPresentation.title == "$0.00")
       // The balance itself is untouched by the metric setting.
       #expect(model.balanceState?.amountText == "$12.34")
 
       model.settings.menuBarMetric = .cacheHitRate
+      // No prompt tokens in the window: an unknown rate, which the label shows as an em dash.
       #expect(model.menuBarLabel == "—")
     }
   }
