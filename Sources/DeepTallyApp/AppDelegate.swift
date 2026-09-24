@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   private var model: AppModel?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
+    LaunchLog.record()
     let model = AppModel()
     self.model = model
     self.statusItemController = StatusItemController(model: model)
