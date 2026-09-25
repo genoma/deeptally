@@ -353,9 +353,11 @@ public final class LedgerStore {
   /// ``reprice(costing:batchSize:)`` is the money repair, and an import that silently repriced history
   /// whenever the price table changed would make "what did this import change?" unanswerable.
   ///
-  /// Only the counters and the cost are ever rewritten. `ts`, `source`, `provider`, `model` and
-  /// `session_id` stay as first stored: `rawHash` identifies the source row, and the instant that row
-  /// is *about* does not move when its counters grow.
+  /// A repair rewrites counters, cost, `model` and `ts` together, so the row always matches the record
+  /// it came from. Writing the cost of one model onto a row that names another - or onto a row at an
+  /// instant the cost was not computed for - would leave a row whose own `reprice` contradicts it, and
+  /// a model correction could never be persisted (review finding N7). `rawHash` still identifies the
+  /// source row; `source`, `provider` and `session_id` stay as first stored.
   ///
   /// The empty-key refusal is ``insert(_:)``'s: an empty `rawHash` is a bug that would disable dedupe,
   /// so it throws ``LedgerError/emptyRawHash(row:)`` before anything is written. The rollups for the
@@ -387,17 +389,21 @@ public final class LedgerStore {
           touchedDays.insert(Self.utcDayStart(row.record.timestamp))
           continue
         }
-        guard stored.counters != counters else {
+        guard stored.counters != counters || stored.model != row.record.model else {
           unchanged += 1
           continue
         }
         try updateCounters(
           update, counters: counters, costMicroUSD: MicroUSD.fromDecimal(row.record.costUSD),
+          model: row.record.model,
+          timestampSeconds: Int64(row.record.timestamp.timeIntervalSince1970),
           id: stored.id)
         updated += 1
+        // Both days: the row leaves the instant it was stored at and joins the one it names now.
         touchedDays.insert(
           Self.utcDayStart(
             Date(timeIntervalSince1970: TimeInterval(stored.timestampSeconds))))
+        touchedDays.insert(Self.utcDayStart(row.record.timestamp))
       }
 
       if !touchedDays.isEmpty { try rebuildDailyRollups(forDaysStartingAt: touchedDays) }
@@ -427,6 +433,9 @@ public final class LedgerStore {
   private struct StoredRequest {
     let id: Int64
     let timestampSeconds: Int64
+    /// Carried so a repair can tell that the source row now names a different model, which is what
+    /// makes a stored cost disagree with the row it is written to (review finding N7).
+    let model: String
     let counters: StoredCounters
   }
 
@@ -495,22 +504,25 @@ public final class LedgerStore {
       return StoredRequest(
         id: sqlite3_column_int64(statement, 0),
         timestampSeconds: sqlite3_column_int64(statement, 1),
+        model: text(statement, 2) ?? "",
         counters: StoredCounters(
-          input: sqlite3_column_int64(statement, 2),
-          output: sqlite3_column_int64(statement, 3),
-          reasoning: sqlite3_column_int64(statement, 4),
-          cacheRead: sqlite3_column_int64(statement, 5),
-          cacheWrite: sqlite3_column_int64(statement, 6)))
+          input: sqlite3_column_int64(statement, 3),
+          output: sqlite3_column_int64(statement, 4),
+          reasoning: sqlite3_column_int64(statement, 5),
+          cacheRead: sqlite3_column_int64(statement, 6),
+          cacheWrite: sqlite3_column_int64(statement, 7)))
     default:
       throw Self.error(
         step, context: "select request by raw hash", message: Self.errorMessage(database))
     }
   }
 
-  /// Rewrites one stored row's counters and cost. Only ever called for a row whose counters differ,
-  /// which is why the number of statements this runs is ``UpsertOutcome/updated``.
+  /// Rewrites one stored row so it matches the record it came from: counters, cost, model and instant
+  /// together. Only ever called for a row that differs, which is why the number of statements this runs
+  /// is ``UpsertOutcome/updated``.
   private func updateCounters(
-    _ statement: OpaquePointer, counters: StoredCounters, costMicroUSD: Int64, id: Int64
+    _ statement: OpaquePointer, counters: StoredCounters, costMicroUSD: Int64, model: String,
+    timestampSeconds: Int64, id: Int64
   ) throws {
     _ = sqlite3_reset(statement)
     _ = sqlite3_clear_bindings(statement)
@@ -520,7 +532,9 @@ public final class LedgerStore {
     try bind(statement, 4, counters.cacheRead)
     try bind(statement, 5, counters.cacheWrite)
     try bind(statement, 6, costMicroUSD)
-    try bind(statement, 7, id)
+    try bind(statement, 7, model)
+    try bind(statement, 8, timestampSeconds)
+    try bind(statement, 9, id)
     let step = sqlite3_step(statement)
     guard step == SQLITE_DONE else {
       throw Self.error(
@@ -536,16 +550,21 @@ public final class LedgerStore {
     """
 
   private static let selectRequestByHashSQL = """
-    SELECT id, ts, input, output, reasoning, cache_read, cache_write
+    SELECT id, ts, model, input, output, reasoning, cache_read, cache_write
       FROM request
      WHERE raw_hash = ?1
     """
 
+  /// A repair rewrites the row so it matches the record it came from. `model` and `ts` are part of
+  /// that: a cost is a function of the model and the instant, so a row whose counters were updated
+  /// while its model or instant stayed behind would name a model it was not priced with, and the next
+  /// `reprice` would move the cost back. `rawHash` identifies the source row; the values written here
+  /// are that row's current ones.
   private static let updateRequestCountersSQL = """
     UPDATE request
        SET input = ?1, output = ?2, reasoning = ?3, cache_read = ?4, cache_write = ?5,
-           cost_micro_usd = ?6
-     WHERE id = ?7
+           cost_micro_usd = ?6, model = ?7, ts = ?8
+     WHERE id = ?9
     """
 
   // MARK: - Rollups

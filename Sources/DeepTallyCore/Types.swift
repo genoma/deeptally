@@ -83,19 +83,25 @@ extension Decimal {
     return Decimal(string: text, locale: Locale(identifier: "en_US_POSIX"))
   }
 
-  /// An optional sign, at least one digit and at most one `.` — every shape a hand-written price
-  /// needs, and nothing else. The digits are ASCII so a numeral cannot smuggle in another script.
+  /// An optional sign, at least one digit and at most one `.`, plus an optional exponent — every shape
+  /// a hand-written price needs, and nothing else. The digits are ASCII so a numeral cannot smuggle in
+  /// another script.
+  ///
+  /// The exponent is accepted because `1e-6` is a real decimal that `Decimal(string:)` reads exactly,
+  /// and a per-million price is a natural place to write it: rejecting it silently disabled a working
+  /// user price file, which is a regression against the tolerant path this replaced (review finding N5).
   private static func isDecimalNumeral(_ text: String) -> Bool {
     var index = text.startIndex
     if index < text.endIndex, text[index] == "+" || text[index] == "-" {
       index = text.index(after: index)
     }
-    var digitCount = 0
+
+    var mantissaDigits = 0
     var hasPoint = false
-    while index < text.endIndex {
+    while index < text.endIndex, text[index] != "e", text[index] != "E" {
       switch text[index] {
       case "0"..."9":
-        digitCount += 1
+        mantissaDigits += 1
       case "." where !hasPoint:
         hasPoint = true
       default:
@@ -103,7 +109,22 @@ extension Decimal {
       }
       index = text.index(after: index)
     }
-    return digitCount > 0
+    guard mantissaDigits > 0 else { return false }
+    guard index < text.endIndex else { return true }  // no exponent: the mantissa is the number
+
+    index = text.index(after: index)  // the e or E
+    if index < text.endIndex, text[index] == "+" || text[index] == "-" {
+      index = text.index(after: index)
+    }
+
+    var exponentDigits = 0
+    while index < text.endIndex, case "0"..."9" = text[index] {
+      exponentDigits += 1
+      index = text.index(after: index)
+    }
+    // A well-formed exponent needs at least one digit and must end the numeral: `1e` and `1e5x` are not
+    // numbers, and neither is a second exponent.
+    return exponentDigits > 0 && index == text.endIndex
   }
 }
 
