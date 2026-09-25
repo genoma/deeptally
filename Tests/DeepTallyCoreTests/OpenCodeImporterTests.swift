@@ -827,8 +827,14 @@ struct OpenCodeImporterIncrementalTests {
     #expect(scan.records.first?.record.usage.completionTokens == 40)
     // ...with the cost still anchored to `time_created`, not to `time_updated`.
     #expect(scan.records.first?.record.timestamp == watermark)
-    // `latestSeen` is that instant too, so a touched row alone does not move the watermark.
-    #expect(scan.latestSeen == watermark)
+    // `latestSeen` covers the update as well as the creation, so the next pass does not re-offer this
+    // row forever: the watermark advances past every instant the scan actually saw (review finding N3).
+    // A later rewrite moves `time_updated` again, which outruns this watermark and re-offers the row -
+    // that is the F1 guarantee, and the assertion below keeps both halves honest.
+    #expect(scan.latestSeen == Date(timeIntervalSince1970: TimeInterval(updated) / 1_000))
+
+    // The pass immediately after a touched-row import offers nothing at all.
+    #expect(try importer(for: fixture).importAll(since: scan.latestSeen).records.isEmpty)
 
     // A watermark past both instants ends the re-offering, so the widened scan is not "everything".
     let pastBoth = Date(timeIntervalSince1970: TimeInterval(updated) / 1_000 + 1)

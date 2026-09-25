@@ -70,7 +70,7 @@ public struct OpenCodeImporter {
   /// This is the full scan, and it is the right call for the first import of a profile or for a
   /// repair pass. For the fifteen-minute tick use ``importAll(since:)``.
   public func importAll() throws -> [ImportedRecord] {
-    try scan(since: nil)
+    try scan(since: nil).records
   }
 
   /// Every row worth offering since `since`, plus the newest instant seen, so the caller can resume
@@ -91,11 +91,11 @@ public struct OpenCodeImporter {
   /// The importer stores nothing: the ledger owns the watermark, because the ledger is what knows
   /// which rows were actually committed.
   public func importAll(since: Date?) throws -> ImportResult {
-    let records = try scan(since: since)
-    return ImportResult(records: records, latestSeen: records.map(\.record.timestamp).max())
+    let scanned = try scan(since: since)
+    return ImportResult(records: scanned.records, latestSeen: scanned.latestSeen)
   }
 
-  private func scan(since: Date?) throws -> [ImportedRecord] {
+  private func scan(since: Date?) throws -> (records: [ImportedRecord], latestSeen: Date?) {
     guard FileManager.default.fileExists(atPath: databaseURL.path) else {
       throw ImportError.databaseMissing(path: databaseURL.path)
     }
@@ -122,9 +122,39 @@ public struct OpenCodeImporter {
     }
 
     let merged = merge(candidates)
-    guard let since else { return merged }
-    let reconsidered = Self.reconsideredRawHashes(candidates, since: since)
-    return merged.filter { reconsidered.contains($0.rawHash) }
+
+    // What the scan reports as "newest seen" decides the next watermark, so it has to cover every
+    // instant this pass looked at - including opencode's own updates. Reporting only the record
+    // instants left a touched row that is newer than the newest created time re-offered on every
+    // pass forever: nothing was written (the counters matched), but each pass re-scanned it and the
+    // CLI kept reporting it as offered (review finding N3). A later update still outruns the stored
+    // watermark, so the guarantee that a rewritten row is re-offered is unchanged.
+    let kept: [ImportedRecord]
+    let covered: [Candidate]
+    if let since {
+      let reconsidered = Self.reconsideredRawHashes(candidates, since: since)
+      kept = merged.filter { reconsidered.contains($0.rawHash) }
+      covered = candidates.filter { reconsidered.contains($0.rawHash) }
+    } else {
+      kept = merged
+      covered = candidates
+    }
+    return (kept, Self.newestInstant(records: kept, candidates: covered))
+  }
+
+  /// The newest instant a scan covered: the record instants it offers, or opencode's updates to those
+  /// same rows, whichever is later.
+  private static func newestInstant(records: [ImportedRecord], candidates: [Candidate]) -> Date? {
+    let created = records.map(\.record.timestamp).max()
+    let updated = candidates.map {
+      Date(timeIntervalSince1970: TimeInterval($0.timeUpdated) / 1_000)
+    }.max()
+    switch (created, updated) {
+    case (let created?, let updated?): return max(created, updated)
+    case (let created?, nil): return created
+    case (nil, let updated?): return updated
+    case (nil, nil): return nil
+    }
   }
 
   /// The authoritative watermark test, as the set of source rows it keeps.
