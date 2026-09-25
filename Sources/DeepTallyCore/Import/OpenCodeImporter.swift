@@ -175,10 +175,16 @@ public struct OpenCodeImporter {
   /// was never offered again. Re-offering a row is cheap: the ledger writes only what actually
   /// differs (``LedgerStore/upsert(_:)``).
   ///
-  /// The answer is a set of `rawHash`es rather than a filtered candidate list on purpose: the union
-  /// chooses between a row's generations with `time_updated` and the `message`-wins rule, and that
-  /// choice must not depend on the watermark, or an incremental scan and a full scan would offer
-  /// *different records* for the same source row and the ledger would rewrite the row on every tick.
+  /// The answer is a set of `rawHash`es rather than a filtered candidate list, so the union's choice
+  /// between a row's generations does not depend on the watermark in the ordinary case.
+  ///
+  /// Known limitation (review finding N4): it still can, when one copy's `time_created` **and**
+  /// `time_updated` are both older than the watermark while another copy of the same row was touched.
+  /// The group then holds only the touched copy, so a full scan could have chosen a different one, and
+  /// the model a report shows can differ from the model a full scan would report. Nothing is written
+  /// differently today (equal counters count as unchanged), so this is a reporting inconsistency, not a
+  /// ledger one. The fix is to decide each group from all of its copies before the watermark filter;
+  /// it is tracked for Step 5 rather than half-done here.
   /// The cost is recomputed from whichever record the merge chose, at that record's own instant.
   private static func reconsideredRawHashes(
     _ candidates: [Candidate], since: Date

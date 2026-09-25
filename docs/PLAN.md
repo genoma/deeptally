@@ -176,15 +176,15 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   - **Real balance, Keychain only:** rendered the shipping popover with `DEEPSEEK_API_KEY` unset → `keyOrigin: keychain`, `$11.66`, "as of", off-peak panel, no banners.
   - **Kill/restart:** two consecutive `make smoke` cycles (app alive after 4 s each) plus the persisted reading in the app domain (`...last-reading`, 173 bytes) adopted at launch.
   - **Wake:** `--spike simulate-wake` → `refreshedOnWake: true`, fetch timestamp advanced 21:44:49Z → 21:44:50Z. *Honest limit:* this proves our handler; delivery on a real lid-open is macOS behaviour and is not simulated.
-  - **`make verify`-class gate:** build · **164 tests in 26 suites** · lint clean · bundle · `codesign --verify --strict` · `make smoke`.
+  - **`make verify`-class gate:** build · 164 tests at the time · lint clean · bundle · `codesign --verify --strict` · `make smoke`. (The suite is 319 tests by the end of Step 4.)
   - **Independent review:** blocked the gate on two P1 defects and seven P2s; all fixed, each core fix proven by a test that fails without it, and the two P1s re-verified by a forced-low render (`menuBarWarningGlyph: true`, tooltip "DeepSeek balance … is low.") and by a 401 → Forget key → banner-gone sequence.
   - **Still human-checkable (recorded, not claimed):** offline/airplane mode end to end (deliberately not simulated — it would disrupt the network; the error path itself was exercised by a real 401), and real sleep/wake. A first-run login-item registration was measured in S3 but not re-exercised here, because it would leave a login item pointing at a development path.
-  - **Known gap, carried forward:** the app target has **no automated tests** (`Package.swift` defines no target for it), so every app-layer claim above rests on renders, smoke runs and inspection rather than assertions. The independent review recommends a `DeepTallyAppTests` target exercising `AppModel`/`AppEnvironment`/`LoginItem` with stubs — the client factory and the shell runner are already seams. Worth doing before the ledger puts real logic into that layer.
+  - **Was a known gap, closed in Step 4:** the app target had no automated tests at all, so every app-layer claim above rested on renders and inspection. Step 4 added `Tests/DeepTallyAppTests` (55 tests by the end of the step, over documented injection seams), which is why the layer could absorb the ledger without becoming guesswork.
   **Gate:** real balance visible ✅ · survives kill/restart ✅ · sleep/wake handler ✅ (simulated notification) · airplane mode ⏳ human-checkable · login item registers on a fresh install ✅ measured in S3.
   **Lanes:** Wave A (keychain, settings, rate, balance) · Wave B (views, cli, integration, docs) · Wave C (review fixes: core, app, docs)
 
 ### Step 4 — Ledger, pricing, importer
-**Status:** complete except the D5 wave in flight (app self-heal + independent review)
+**Status:** complete — acceptance-reviewed 2026-09-24/25 (all findings closed; see the note below)
 - [x] `LedgerStore` over the system `libsqlite3` with schema versioning from v1, `INSERT OR IGNORE` dedupe on `raw_hash`, UTC-keyed daily rollups, pruning, CSV round-trip *(lane LEDGER — 16 tests; money is INTEGER micro-USD because this project refuses Double for money; the store is deliberately not `Sendable`, which the compiler enforces)*
 - [x] Importer extended with an incremental `since:` watermark, and `LedgerSync` as the one flow the CLI and the app share *(the ledger owns the watermark, because the ledger is what knows which rows committed)*
 - [x] CLI: `deeptally import [--full]`, `deeptally usage [--json] [--days N]`, `deeptally ledger export|prune|reprice`
@@ -202,11 +202,26 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   | unpriced models | 5 | **none** |
 
   **Gate evidence (all observed):**
-  - **Idempotence:** `import` twice → `Imported 5275 new rows` then `Imported 0 new rows of 0 offered`; `import --full` → `0 new rows of 5275 offered`.
+  - **Idempotence:** `import` twice → `Imported 5275 new rows` then `Imported 0 new rows of 0 offered`; `import --full` → `0 new rows of 5275 offered`. After the N3 fix the *second* incremental import offers nothing even when opencode has touched a row since the first: the watermark now covers every instant the scan looked at, not just the newest creation.
+  - **Acceptance review (fresh-context, read-only):** "F1, F2, F3, F4, F5, F6, F8 and F9 are each genuinely closed... no P0/P1." Every finding was checked against the deciding lines *and* against the test that fails if the fix is reverted. It then found eight lesser issues in the fixes' blast radius, of which six were fixed in the same step (N1, N2, N3, N5, N6, N7) and one is documented as a limitation (N4, in the importer's own comment).
   - **Hand-calculated cost, independently derived in SQL from the price table's own numbers:** every row of two real sessions matches exactly (flash 6/6 rows, v4-pro 1/1). Across the whole ledger the float-SQL cross-check agrees on **5,274 of 5,275 rows**; the single difference is a half-micro-USD rounding case (exact value 3657.5 µUSD) where floating point lands one micro below the ledger's exact `Decimal` arithmetic. The ledger is the correct one.
   - **Reasoning is billed as output:** the first version of that cross-check disagreed on five of six rows, and every gap was exactly the reasoning-token count multiplied by the output price — confirming the rule Step 1's research had only been able to infer.
   - **Reprice:** 4,237 rows changed, `integrity_check` ok, rollups agreeing with the raw rows to the micro-dollar, and a second run reporting `rowsChanged: 0`.
-  - 290 tests (217 core + 27 CLI + 46 app) · lint clean · bundle signed · `make smoke` alive.
+  - **Known limitations, tracked rather than hidden:**
+    - **N4 (Step 5):** an incremental scan can offer a different copy of a row than a full scan when one
+      copy's timestamps are both below the watermark and another copy was touched. No ledger effect today
+      (equal counters are left alone); it can change which model a report names. The importer's comment
+      states it plainly.
+    - **Rollup reader (Step 5):** nothing reads the `daily` table yet, so a pruned range is gone from
+      `deeptally usage` even though its aggregate survives. The command, its help and the docs now say so.
+    - **Rollup versus full resync (pre-existing):** a `--full` resync after a prune rebuilds only the days
+      it touches from the surviving rows, so a partly pruned day can lose the rest of its kept aggregate.
+      The old whole-table rebuild had the same hole; `usage` does not read rollups today.
+  - **Environment note (2026-09-25):** the machine spent the night in DarkWake cycles (~16-minute
+    maintenance wakes). Two effects, both diagnosable and neither a code defect: four lane runs stalled at
+    their 30-minute deadline during throttled windows, and the Keychain returned `-25320 In dark wake, no
+    UI possible` — which the app reported as a keychain problem and fell back on, exactly as the F7 fix
+    intends. The menu bar shows a stale reading until the Mac is awake and the key resolves again.
 
 ### Step 5 — Analytics popover + exports
 - [ ] Popover: balance card, today/7d/30d spend, cache-hit %, per-model breakdown, cache sparkline
@@ -288,3 +303,4 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 3 | Docs lane merged (USAGE/PRIVACY/ARCHITECTURE/README + a regenerated settings screenshot), plus two parent follow-ups the lanes could not do: `AppEnvironment` now actually wires `loadWithDiagnostics()`, and the reviewer-style inspection of that wiring found a defect of my own — a rejected user override suppressed the rate panel and its banner contradicted itself. Both fixed by separating "no table" from "override rejected" and cutting an NSError dump out of the user-facing sentence. |
 | 2026-09-24 | 4 | Ledger, importer watermark, aliases, reprice, CLI surface and menu-bar metrics all merged. The real-ledger finding (4,237 rows at $0) is recorded above with the before/after numbers. |
 | 2026-09-24 | 4 | **Orchestration error of mine:** I launched two lanes against the same CLI file in one wave, merged one of them, then merged two further lanes on top before noticing. The union had to be reconciled by a dedicated lane with both test suites as the contract. The docs lane caught it first by observing that the code its documentation described was absent from its base. Lesson recorded: two writers, one file, no arbitration point is a brief-level mistake, not a lane-level one. |
+| 2026-09-25 | 4 | Step 4 closed. Real ledger: 5,275 rows, 0 unpriced, \$14.378060. 319 tests (231 core + 33 CLI + 55 app). Independent acceptance review: every finding closed, no blockers. Six of its eight follow-ups fixed in the same step; N4 documented as a limitation. Also ported the app-side cost repair, which I had previously reported as delivered while its branch sat unmerged — reported, then corrected here. |
