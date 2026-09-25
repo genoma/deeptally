@@ -20,7 +20,10 @@ struct AppModelPricingNoteTests {
   @Test("an offered row whose model has no price produces the note, and no banner")
   func unpricedRowProducesNote() async throws {
     try await withIsolatedDefaults(Self.domain) { defaults in
-      let fixture = makeFixture(defaults: defaults)
+      // The app's real wiring: a costing exists exactly when the price table is readable, and the note
+      // is derived from the LEDGER's unpriced rows rather than from this pass's offered ones.
+      let fixture = makeFixture(
+        defaults: defaults, costing: CostEngine(table: try PriceTableLoader().loadBundled()))
       fixture.usageSource.offer([
         importedRecord(
           at: fixture.clock.now, model: Self.unpricedModel, costUSD: .zero)
@@ -31,7 +34,7 @@ struct AppModelPricingNoteTests {
       await waitUntil("the launch ledger pass") { model.localUsage != nil }
 
       let note = try #require(model.localUsageNote)
-      #expect(note.contains("1 local row"))
+      #expect(note.contains("1 ledger row"))
       #expect(note.contains(Self.unpricedModel))
       #expect(note.contains("the price table"))
       #expect(note.contains("zero cost"))
@@ -62,7 +65,8 @@ struct AppModelPricingNoteTests {
   @Test("the metrics still show the priced rows' values while the note is up")
   func metricsKeepPricedValues() async throws {
     try await withIsolatedDefaults(Self.domain) { defaults in
-      let fixture = makeFixture(defaults: defaults)
+      let fixture = makeFixture(
+        defaults: defaults, costing: CostEngine(table: try PriceTableLoader().loadBundled()))
       fixture.usageSource.offer([
         importedRecord(at: fixture.clock.now, model: "deepseek-flash", costUSD: decimal("0.42")),
         importedRecord(at: fixture.clock.now, model: Self.unpricedModel, costUSD: .zero),

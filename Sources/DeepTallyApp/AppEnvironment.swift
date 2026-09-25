@@ -32,6 +32,11 @@ struct AppEnvironment: Sendable {
   /// disabled. A closure because the importer is not `Sendable`; the ledger actor builds it, and the
   /// costing it prices with is the one this closure captured, so the two can never disagree.
   let makeUsageSource: (@Sendable () -> any UsageImporting)?
+  /// What the ledger's one launch repair prices stored rows with, or `nil` when the price table could
+  /// not be read: repricing under ``PriceTable/unavailable`` would price every row at nothing while
+  /// recording a version no table names. The same engine ``makeUsageSource`` imports with, so a row
+  /// repaired on launch and a row imported a moment later cannot be priced by two different tables.
+  let rowCosting: (any RowCosting)?
   /// The timezone every local day boundary is computed with; see ``calendar``.
   let timeZone: TimeZone
 
@@ -135,8 +140,10 @@ struct AppEnvironment: Sendable {
         OpenCodeImporter(
           databaseURL: openCodeDatabaseURL, costing: costEngine.cost(model:usage:at:))
       }
+      self.rowCosting = costEngine
     } else {
       self.makeUsageSource = nil
+      self.rowCosting = nil
     }
     self.peakOffPeak = costEngine.peakOffPeak
     self.rateNow = RateNowPresenter(
@@ -172,7 +179,8 @@ struct AppEnvironment: Sendable {
   /// "no usable price table" turns into "no import" once, in one place.
   func makeLocalUsageLedger() -> LocalUsageLedger {
     LocalUsageLedger(
-      ledgerURL: ledgerURL, priceTable: priceTable, makeSource: makeUsageSource)
+      ledgerURL: ledgerURL, priceTable: priceTable, makeSource: makeUsageSource,
+      costing: rowCosting)
   }
 
   // MARK: - Diagnostics

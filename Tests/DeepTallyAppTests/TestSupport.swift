@@ -437,7 +437,8 @@ func makeFixture(
   key: APIKeySource = testKeySource(.environment(testEnvironmentKey)),
   settings: AppSettings = .default,
   ledgerURL: URL? = nil,
-  usageSource: StubUsageSource = StubUsageSource()
+  usageSource: StubUsageSource = StubUsageSource(),
+  costing: (any RowCosting)? = nil
 ) -> AppModelFixture {
   SettingsStore(defaults: defaults).save(settings)
   let fetcher = StubBalanceFetcher(outcome: outcome)
@@ -464,7 +465,8 @@ func makeFixture(
   let ledger = LocalUsageLedger(
     ledgerURL: environment.ledgerURL,
     priceTable: environment.priceTable,
-    makeSource: { [usageSource] in usageSource })
+    makeSource: { [usageSource] in usageSource },
+    costing: costing)
   let model = AppModel(
     environment: environment,
     scheduler: alerts,

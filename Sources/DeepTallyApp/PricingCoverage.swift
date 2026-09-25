@@ -40,12 +40,21 @@ final class PricingCoverage: UsageImporting {
   /// every offered row had a price. The model ids are capped the way the CLI caps them: a note that
   /// names thirty ids is not a note.
   var pricingNote: String? {
-    guard unpricedRows > 0 else { return nil }
-    let named = unpricedModels.sorted().prefix(3).joined(separator: ", ")
-    let remaining = unpricedModels.count - 3
+    Self.note(rows: unpricedRows, models: Array(unpricedModels), scope: "local")
+  }
+
+  /// The one sentence shape both the per-pass counter and the ledger-wide summary render, so a user is
+  /// never told the same thing two different ways.
+  ///
+  /// `scope` names what the rows belong to: "ledger" for the rows the ledger holds, "local" for the rows
+  /// one import offered.
+  static func note(rows: Int, models: [String], scope: String) -> String? {
+    guard rows > 0 else { return nil }
+    let named = models.sorted().prefix(3).joined(separator: ", ")
+    let remaining = models.count - 3
     let more = remaining > 0 ? ", +\(remaining) more" : ""
-    let subject = unpricedRows == 1 ? "1 local row uses" : "\(unpricedRows) local rows use"
-    let pronoun = unpricedRows == 1 ? "it was" : "they were"
+    let subject = rows == 1 ? "1 \(scope) row uses" : "\(rows) \(scope) rows use"
+    let pronoun = rows == 1 ? "it was" : "they were"
     return "\(subject) a model the price table does not list (\(named)\(more));"
       + " \(pronoun) recorded at zero cost."
   }

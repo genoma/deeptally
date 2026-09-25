@@ -59,24 +59,37 @@ actor LocalUsageLedger {
   /// rows instead of a 400 MB fixture database.
   private let makeSource: (@Sendable () -> any UsageImporting)?
 
+  /// What the one launch repair prices stored rows with, or `nil` when there is nothing to repair with:
+  /// an unreadable price table, or a caller that only reads. A value, not a closure like
+  /// ``makeSource``: ``RowCosting`` is `Sendable`, so unlike the importer it can cross into the actor,
+  /// and it is the same table the importer prices new rows with.
+  private let costing: (any RowCosting)?
+
   /// Opened on the first pass and kept for the life of the actor: one connection, WAL, busy timeout.
   private var ledger: LedgerStore?
   /// The last successful read. Survives a failed pass so an import error cannot blank a number.
   private var lastMetrics: LocalUsageMetrics?
+  /// `true` from the moment the one launch repair is reached, successful or not, so a reprice scan can
+  /// never repeat on the fifteen-minute tick. See ``repairStoredCosts(in:)``.
+  private var didAttemptRepair = false
 
   /// `makeSource: nil` disables importing while still reading the metrics. A price table that cannot
   /// be read lists no models, and `CostEngine` prices a model it does not know at zero: importing then
   /// would write real usage into the ledger at $0 permanently, because the cost travels with the row.
   /// Skipping loses nothing — the watermark does not move — so the next pass with a good table
   /// imports exactly the rows that were skipped.
+  /// `costing: nil` disables the repair while still importing and reading: a caller with no price
+  /// table, and every test that is not about the repair itself.
   init(
     ledgerURL: URL,
     priceTable: PriceTable,
-    makeSource: (@Sendable () -> any UsageImporting)?
+    makeSource: (@Sendable () -> any UsageImporting)?,
+    costing: (any RowCosting)? = nil
   ) {
     self.ledgerURL = ledgerURL
     self.priceTable = priceTable
     self.makeSource = makeSource
+    self.costing = costing
   }
 
   /// One pass: import what the source has newer than the ledger's stored watermark, then read the two
@@ -94,6 +107,10 @@ actor LocalUsageLedger {
       return Outcome(
         metrics: lastMetrics, importProblem: String(describing: error), pricingNote: nil)
     }
+
+    // Before the import, so a first run over a fresh ledger records the table without scanning the rows
+    // it is about to import, and before the read, so the numbers shown are the repaired ones.
+    repairStoredCosts(in: ledger)
 
     var importProblem: String?
     var pricingNote: String?
@@ -126,6 +143,37 @@ actor LocalUsageLedger {
     let pricingNote: String?
   }
 
+  /// The one repair pass this process runs: the only write the app makes to rows it has already
+  /// imported, and the answer to a user who will never run a CLI command.
+  ///
+  /// A row's cost is computed once, at import, and stored beside its tokens. A row whose model id did
+  /// not resolve then is stored at zero and a re-import cannot fix it, because `raw_hash` makes it a
+  /// duplicate — correct for counting, useless for repair. ``LedgerStore/reprice(costing:batchSize:)``
+  /// is the repair, and the only reason to run it is that the table in hand is not the one the stored
+  /// costs came from, which the ledger records as a version (see
+  /// ``LedgerStore/recordedRepricePriceTableVersion()``). A matching version, or a costing that names
+  /// no table, is nothing to scan for.
+  ///
+  /// At most once per app run, on the first pass that has a costing, and never on the fifteen-minute
+  /// tick: this is a repair for a changed price table, not a routine. Silent by design — it runs
+  /// before the metrics are read, so success shows up as the repaired numbers, and a failure leaves
+  /// the ledger exactly as it was, which is nothing the user would have to clear or could act on. The
+  /// next launch tries again with whatever table it loads then.
+  private func repairStoredCosts(in ledger: LedgerStore) {
+    guard !didAttemptRepair, let costing, !costing.priceTableVersion.isEmpty else { return }
+    didAttemptRepair = true
+    do {
+      guard try ledger.recordedRepricePriceTableVersion() != costing.priceTableVersion else {
+        return
+      }
+      _ = try ledger.reprice(costing: costing)
+    } catch {
+      // Swallowed on purpose: the ledger still reads, so the numbers on screen are the ones it holds,
+      // and this is not "local usage is not being imported yet". `deeptally ledger reprice` reports the
+      // same failure to anyone who asks for the detail.
+    }
+  }
+
   /// Imports everything newer than the ledger's watermark, or returns why it did not.
   private func importNewerUsage(into ledger: LedgerStore) throws -> ImportReport {
     guard let makeSource else {
@@ -135,7 +183,19 @@ actor LocalUsageLedger {
     // consumed and the note describes exactly the rows that were offered to it.
     let source = PricingCoverage(wrapping: makeSource(), table: priceTable)
     try LedgerSync(ledger: ledger, source: source).sync()
-    return ImportReport(problem: nil, pricingNote: source.pricingNote)
+    // The note describes the LEDGER, not this pass's offered rows: a pass that offers nothing while the
+    // ledger still holds zero-cost rows would otherwise clear the caveat and leave a clean panel over
+    // under-reported spend (review finding N1). The extra scan is one row pass over the ledger, on the
+    // actor, on the same fifteen-minute cadence as the import itself.
+    return ImportReport(problem: nil, pricingNote: try ledgerPricingNote(ledger))
+  }
+
+  /// The ledger-wide unpriced sentence, or `nil` when every stored row has a price.
+  private func ledgerPricingNote(_ ledger: LedgerStore) throws -> String? {
+    guard let costing else { return nil }
+    let summary = try ledger.unpricedSummary(costing: costing)
+    return PricingCoverage.note(
+      rows: summary.rowsUnpriced, models: summary.models.map(\.model), scope: "ledger")
   }
 
   private func openLedger() throws -> LedgerStore {

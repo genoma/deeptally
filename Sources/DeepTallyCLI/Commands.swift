@@ -45,9 +45,10 @@ final class PricingCoverage: UsageImporting {
   var warning: String? {
     guard unpricedRows > 0 else { return nil }
     let models = unpricedModels.sorted().joined(separator: ", ")
-    let verb = unpricedRows == 1 ? "row uses" : "rows use"
-    return "warning: \(unpricedRows) offered \(verb) a model the price table does not list"
-      + " (\(models)); they were recorded with a cost of 0."
+    let singular = unpricedRows == 1
+    return
+      "warning: \(unpricedRows) offered \(singular ? "row uses" : "rows use") a model the price table"
+      + " does not list (\(models)); \(singular ? "it was" : "they were") recorded with a cost of 0."
   }
 }
 
@@ -589,15 +590,32 @@ enum CLI {
     }
 
     let scan = options.full ? "full resync" : "incremental scan"
-    print("Imported \(insertedRows(outcome.inserted)) of \(outcome.offered) offered (\(scan)).")
-    if outcome.inserted == 0 {
-      print("  nothing new: the ledger already holds every row opencode offered.")
-    }
+    let report = importReport(outcome, scan: scan)
+    print(report.headline)
+    if let detail = report.detail { print(detail) }
     print("  watermark: \(watermarkText(outcome.watermark))")
     print("  ledger:    \(ledger.url.path)")
     if let warning = coverage.warning {
       writeToStandardError(warning)
     }
+  }
+
+  /// The two lines that describe what an import did. Extracted so the repaired count is pinned by a
+  /// test: the command used to print "nothing new" whenever nothing was inserted, even when rows had
+  /// just been rewritten in place, which made the repair invisible (review finding N2).
+  static func importReport(_ outcome: LedgerSync.Outcome, scan: String) -> (
+    headline: String, detail: String?
+  ) {
+    let headline =
+      "Imported \(insertedRows(outcome.inserted)) of \(outcome.offered) offered (\(scan))."
+    guard outcome.updated > 0 else {
+      return (
+        headline,
+        outcome.inserted == 0
+          ? "  nothing new: the ledger already holds every row opencode offered." : nil
+      )
+    }
+    return (headline, "  repaired \(outcome.updated), unchanged \(outcome.unchanged).")
   }
 
   private static let importCommandUsage = "usage: deeptally import [--full]"

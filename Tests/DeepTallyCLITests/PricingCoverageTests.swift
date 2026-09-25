@@ -53,7 +53,7 @@ struct PricingCoverageTests {
     #expect(
       try #require(coverage.warning)
         == "warning: 1 offered row uses a model the price table does not list (deepseek-v3);"
-        + " they were recorded with a cost of 0.")
+        + " it was recorded with a cost of 0.")
   }
 
   // MARK: - Fixtures
