@@ -108,6 +108,7 @@ struct PopoverView: View {
       isImportingKey: model.isImportingKey,
       importMessage: model.importMessage,
       alertsUnavailable: model.alertsUnavailable,
+      proxyCaption: model.proxyCaption,
       onImportFromShell: { model.importKey(from: $0) },
       onDeleteKey: { model.deleteKey() }
     )

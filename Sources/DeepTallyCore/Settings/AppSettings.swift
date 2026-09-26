@@ -20,6 +20,11 @@ public struct AppSettings: Codable, Sendable, Equatable {
   public var notificationsEnabled: Bool
   public var notificationCooldownMinutes: Int
   public var showSecondaryMetric: Bool
+  /// Whether the opt-in loopback usage proxy listens. Off by default: it is the only part of the app
+  /// that accepts a connection, so it is never on because of an update.
+  public var proxyEnabled: Bool
+  /// The port the proxy binds on loopback. Never a privileged port.
+  public var proxyPort: Int
 
   public init(
     refreshIntervalMinutes: Int = 20,
@@ -27,7 +32,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
     menuBarMetric: MenuBarMetric = .balance,
     notificationsEnabled: Bool = true,
     notificationCooldownMinutes: Int = 720,
-    showSecondaryMetric: Bool = false
+    showSecondaryMetric: Bool = false,
+    proxyEnabled: Bool = false,
+    proxyPort: Int = 8787
   ) {
     self.refreshIntervalMinutes = refreshIntervalMinutes
     self.lowBalanceThreshold = lowBalanceThreshold
@@ -35,6 +42,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     self.notificationsEnabled = notificationsEnabled
     self.notificationCooldownMinutes = notificationCooldownMinutes
     self.showSecondaryMetric = showSecondaryMetric
+    self.proxyEnabled = proxyEnabled
+    self.proxyPort = proxyPort
   }
 
   /// What a fresh install starts from, and the fallback for anything unreadable.
@@ -47,6 +56,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
   public static let refreshIntervalRange = 5...240
   public static let lowBalanceThresholdRange: ClosedRange<Decimal> = 0...1000
   public static let notificationCooldownRange = 15...10_080
+  /// The ports the proxy may bind: everything from the top of the privileged range to the top of the
+  /// port space, so a typo can never ask macOS for a port the app cannot have.
+  public static let proxyPortRange = 1024...65_535
 
   /// The same settings with every numeric field pulled into its supported range.
   public func validated() -> AppSettings {
@@ -57,6 +69,9 @@ public struct AppSettings: Codable, Sendable, Equatable {
       lowBalanceThreshold, to: Self.lowBalanceThresholdRange)
     settings.notificationCooldownMinutes = Self.clamp(
       notificationCooldownMinutes, to: Self.notificationCooldownRange)
+    // A nonsense port is pulled into the range like every other numeric field, rather than resetting
+    // the whole blob: a hand-edited 1 becomes 1024, and the rest of the settings survive it.
+    settings.proxyPort = Self.clamp(proxyPort, to: Self.proxyPortRange)
     return settings
   }
 
@@ -73,6 +88,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     case notificationsEnabled
     case notificationCooldownMinutes
     case showSecondaryMetric
+    case proxyEnabled
+    case proxyPort
   }
 
   /// Tolerant by design: a missing key, a value of the wrong type, or a `menuBarMetric` string this
@@ -97,6 +114,12 @@ public struct AppSettings: Codable, Sendable, Equatable {
     showSecondaryMetric =
       (try? container.decodeIfPresent(Bool.self, forKey: .showSecondaryMetric))
       ?? fallback.showSecondaryMetric
+    proxyEnabled =
+      (try? container.decodeIfPresent(Bool.self, forKey: .proxyEnabled))
+      ?? fallback.proxyEnabled
+    proxyPort =
+      (try? container.decodeIfPresent(Int.self, forKey: .proxyPort))
+      ?? fallback.proxyPort
   }
 
   public func encode(to encoder: any Encoder) throws {
@@ -107,6 +130,8 @@ public struct AppSettings: Codable, Sendable, Equatable {
     try container.encode(notificationsEnabled, forKey: .notificationsEnabled)
     try container.encode(notificationCooldownMinutes, forKey: .notificationCooldownMinutes)
     try container.encode(showSecondaryMetric, forKey: .showSecondaryMetric)
+    try container.encode(proxyEnabled, forKey: .proxyEnabled)
+    try container.encode(proxyPort, forKey: .proxyPort)
   }
 
   /// Money is a JSON **string** in this project (`Decimal.parse` in `Types.swift`), which is what

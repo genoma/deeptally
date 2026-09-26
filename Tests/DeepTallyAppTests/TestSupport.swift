@@ -278,6 +278,32 @@ final class LoginItemStub {
   }
 }
 
+// MARK: - The usage proxy
+
+/// A `UsageProxyServing` the test drives: what `start` was asked for, what it answers, and how often
+/// the model stopped it.
+///
+/// `@MainActor` rather than an actor because the model calls it from the main actor and the test
+/// asserts from there too; the methods are `async` because the protocol is. Injecting this is what
+/// keeps the model's toggle testable without binding a socket.
+@MainActor
+final class StubUsageProxy: UsageProxyServing {
+  /// What `start` answers. `nil` means "it bound the port it was asked for".
+  var outcome: UsageProxyStart?
+  /// Every port `start` was asked for, oldest first.
+  private(set) var startedPorts: [Int] = []
+  private(set) var stopCount = 0
+
+  func start(port: Int) async -> UsageProxyStart {
+    startedPorts.append(port)
+    return outcome ?? .listening(port: port)
+  }
+
+  func stop() async {
+    stopCount += 1
+  }
+}
+
 // MARK: - Keys
 
 /// The key situation a test wants, without touching the developer's Keychain.
@@ -434,6 +460,8 @@ struct AppModelFixture {
 /// the real opencode database. `ledgerURL` overrides the file for the tests that need the ledger to
 /// be unopenable. `uninstaller` overrides the removal path for the same reason: without it the model
 /// would build the shipping one, which acts on this Mac's real home, Trash, Keychain and login item.
+/// `usageProxy` is the listener seam, so a test that enables the setting never binds a socket: with
+/// `nil` the model builds the shipping server lazily, and only if the setting is on.
 @MainActor
 func makeFixture(
   defaults: UserDefaults,
@@ -443,6 +471,7 @@ func makeFixture(
   ledgerURL: URL? = nil,
   usageSource: StubUsageSource = StubUsageSource(),
   costing: (any RowCosting)? = nil,
+  usageProxy: (any UsageProxyServing)? = nil,
   uninstaller: Uninstaller? = nil
 ) -> AppModelFixture {
   SettingsStore(defaults: defaults).save(settings)
@@ -482,6 +511,7 @@ func makeFixture(
     // delay is exactly `PollingPlan`'s backoff.
     jitterFraction: { 0 },
     localUsageLedger: ledger,
+    usageProxy: usageProxy,
     uninstaller: uninstaller
   )
   return AppModelFixture(

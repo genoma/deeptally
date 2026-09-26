@@ -95,6 +95,19 @@ final class AppModel {
   /// The one owner of the ledger. Injected so the app-layer tests can hand in a source they drive
   /// instead of the developer's opencode database; see ``LocalUsageLedger``.
   private let localUsageLedger: LocalUsageLedger
+  /// The loopback usage proxy, or `nil` while it has never been enabled.
+  ///
+  /// Built lazily, on the first enable, so the recorder it is given can capture this model; nothing
+  /// binds a socket while the setting is off, and a test injects its own here.
+  private var proxy: (any UsageProxyServing)?
+  /// Bumped by every reconcile of the setting, so a start that finishes late cannot overwrite the
+  /// outcome of a newer one.
+  private var proxyGeneration = 0
+  /// The port the listener actually bound, or `nil` while the proxy is off or could not bind.
+  private(set) var proxyBoundPort: Int?
+  /// The one line that says the listener could not start, or `nil`. Never an error dump: the listener
+  /// reports a phrase and the banner carries it. The rest of the app is unaffected either way.
+  private(set) var proxyProblem: String?
   /// The calendar every local day boundary is computed with; see ``AppEnvironment/calendar``.
   private let calendar: Calendar
   /// The currency the ledger prices in, for the spend metric. The table's, never the account's.
@@ -142,6 +155,7 @@ final class AppModel {
     now: @escaping @MainActor () -> Date = { Date() },
     jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
     localUsageLedger: LocalUsageLedger? = nil,
+    usageProxy: (any UsageProxyServing)? = nil,
     uninstaller: Uninstaller? = nil
   ) {
     self.environment = environment
@@ -151,6 +165,7 @@ final class AppModel {
     self.now = now
     self.jitterFraction = jitterFraction
     self.localUsageLedger = localUsageLedger ?? environment.makeLocalUsageLedger()
+    self.proxy = usageProxy
     self.uninstaller =
       uninstaller
       ?? Uninstaller.shipping(loginItem: loginItem, keychain: environment.keychain)
@@ -184,6 +199,7 @@ final class AppModel {
     }
     startTicker()
     startLocalUsage()
+    updateProxy()
     if settings.notificationsEnabled {
       Task { await requestNotificationPermission() }
     }
@@ -195,6 +211,9 @@ final class AppModel {
     scheduling.cancel()
     wakeTask?.cancel()
     pathMonitor.cancel()
+    // Best effort: the socket would go with the process anyway, but cancelling the listener also
+    // releases the port for the next launch, and a connection mid-response gets to finish writing.
+    if let proxy { Task { await proxy.stop() } }
   }
 
   // MARK: - Balance
@@ -560,6 +579,12 @@ final class AppModel {
     if validated.notificationsEnabled, !previous.notificationsEnabled {
       Task { await requestNotificationPermission() }
     }
+    // The listener follows the toggle and the port: started on the first enable, restarted on a new
+    // port, stopped when the toggle goes off.
+    if validated.proxyEnabled != previous.proxyEnabled || validated.proxyPort != previous.proxyPort
+    {
+      updateProxy()
+    }
   }
 
   /// The ledger pass, once at launch and every fifteen minutes after it. A separate, fixed cadence:
@@ -601,6 +626,65 @@ final class AppModel {
   /// The currency the ledger's amounts were priced in, for the analytics panel. The table's, never
   /// the account's: a spend figure is never converted (docs/PLAN.md §1).
   var ledgerCurrencyCode: String { ledgerCurrency }
+
+  // MARK: - Local usage proxy
+
+  /// The settings caption: the address clients are pointed at, with the port the listener actually
+  /// bound. `nil` while the proxy is off or could not start — the banner says why in that case.
+  var proxyCaption: String? {
+    guard settings.proxyEnabled, let port = proxyBoundPort else { return nil }
+    return "Point clients at http://127.0.0.1:\(port) — usage is recorded from each API response."
+  }
+
+  /// Reconciles the listener with the settings. One line and no crash when the port is taken, and
+  /// nothing else in the app waits on the answer.
+  private func updateProxy() {
+    proxyGeneration += 1
+    let generation = proxyGeneration
+    guard settings.proxyEnabled else {
+      // The caption and the problem line are about a listener that is running; the toggle going off
+      // clears both at once rather than leaving them until the cancellation lands.
+      proxyBoundPort = nil
+      proxyProblem = nil
+      if let proxy { Task { await proxy.stop() } }
+      return
+    }
+
+    let port = settings.proxyPort
+    let server = proxy ?? makeProxyServer()
+    proxy = server
+    proxyProblem = nil
+    Task { [weak self] in
+      let outcome = await server.start(port: port)
+      guard let self, generation == self.proxyGeneration else { return }
+      switch outcome {
+      case .listening(let boundPort):
+        self.proxyBoundPort = boundPort
+        self.proxyProblem = nil
+      case .notListening(let reason):
+        self.proxyBoundPort = nil
+        self.proxyProblem = "The local usage proxy could not start: \(reason)."
+      }
+    }
+  }
+
+  /// The server the app ships, with the recorder pointed at the ledger actor.
+  private func makeProxyServer() -> any UsageProxyServing {
+    environment.makeUsageProxyServer(recording: { [weak self] usage in
+      await self?.recordProxyUsage(usage)
+    })
+  }
+
+  /// One proxied response: the ledger prices and stores it, then hands back the metrics it changed,
+  /// which are applied here without a second ledger pass. Recorded rows are the only thing the proxy
+  /// ever writes; a response the reader found no usage in never reaches this. A ledger that cannot be
+  /// written changes nothing on screen here — the next import pass reports it in its own quiet note,
+  /// and a proxied request is not a reason to blank a number that was true a moment ago.
+  private func recordProxyUsage(_ usage: ProxyUsage) async {
+    let outcome = await localUsageLedger.record(usage, now: now(), calendar: calendar)
+    if let metrics = outcome.metrics { localUsage = metrics }
+    if let analytics = outcome.analytics { localUsageAnalytics = analytics }
+  }
 
   // MARK: - CSV transfer
 
@@ -855,6 +939,12 @@ final class AppModel {
     }
     if let loginItemError {
       banners.append(Banner(id: "login-item", kind: .error, message: loginItemError))
+    }
+    if let proxyProblem {
+      // A listener that could not start is a warning and not an error: the balance, the ledger and
+      // the alerts are all unaffected, and the fix — another port, or stopping whatever holds it — is
+      // in the settings panel right below.
+      banners.append(Banner(id: "usage-proxy", kind: .warning, message: proxyProblem))
     }
     return banners
   }

@@ -183,6 +183,16 @@ struct AppEnvironment: Sendable {
       costing: rowCosting)
   }
 
+  // MARK: - Local usage proxy
+
+  /// The opt-in loopback proxy, assembled with the real connection: the upstream is `URLSession`
+  /// against `api.deepseek.com`, and `record` is where a response's usage ends up — the ledger actor
+  /// in the app, a collector in a test.
+  func makeUsageProxyServer(recording record: @escaping ProxyUsageRecorder) -> any UsageProxyServing
+  {
+    UsageProxyServer(upstream: URLSessionProxyUpstream(), record: record)
+  }
+
   // MARK: - Diagnostics
 
   /// A `PricingDataError` as the plain sentence its own type defines, so the app banner and
