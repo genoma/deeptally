@@ -99,4 +99,20 @@ struct TrendScale: Equatable {
 
   /// The cache-hit trend's scale: always 0...100%.
   static let cacheHit = TrendScale(maximum: 1)
+
+  /// The widest a trend bar may be drawn. A series with one or two days would otherwise stretch
+  /// each bar across the panel, and a panel-wide blue capsule with a rounded end reads as a button.
+  static let maximumBarWidth: Double = 10
+  /// The smallest a bar may be drawn; below this the caps merge into a smudge.
+  static let minimumBarWidth: Double = 2
+
+  /// The width one bar gets: the available width shared between the days, capped at
+  /// ``maximumBarWidth`` so a short series stays a short series, and floored at
+  /// ``minimumBarWidth`` so a long one stays distinguishable.
+  static func barWidth(available: Double, spacing: Double, count: Int) -> Double {
+    guard count > 0, available > 0 else { return 0 }
+    let gaps = spacing * Double(max(0, count - 1))
+    let shared = (available - gaps) / Double(count)
+    return min(maximumBarWidth, max(minimumBarWidth, shared))
+  }
 }

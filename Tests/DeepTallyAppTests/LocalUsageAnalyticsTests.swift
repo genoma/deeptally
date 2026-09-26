@@ -35,6 +35,20 @@ struct LocalUsageAnalyticsTests {
     #expect(scale.height(nil) == nil)
   }
 
+  @Test("trend bars are capped so a two-day series cannot read as one wide button")
+  func trendBarWidthIsCapped() {
+    // One and two days sit at the cap: two small bars, not a panel-wide pill.
+    #expect(TrendScale.barWidth(available: 280, spacing: 2, count: 1) == 10)
+    #expect(TrendScale.barWidth(available: 280, spacing: 2, count: 2) == 10)
+    // A full month shares the width between its days.
+    // Spelled as a Double so the literal expression cannot be inferred as integer division.
+    let monthWidth = TrendScale.barWidth(available: 280, spacing: 2, count: 30)
+    #expect(abs(monthWidth - 7.4) < 0.0001)
+    // A series longer than the panel can draw keeps its bars distinguishable.
+    #expect(TrendScale.barWidth(available: 60, spacing: 2, count: 200) == 2)
+    #expect(TrendScale.barWidth(available: 280, spacing: 2, count: 0) == 0)
+  }
+
   // MARK: - Provenance note
 
   @Test("a window answered entirely from raw rows needs no note")

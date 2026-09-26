@@ -110,6 +110,10 @@ struct LocalUsageSection: View {
 
   /// One bar per UTC day that recorded usage, scaled against 0–100%: a rate is not a race, and a
   /// 55% day must not reach the ceiling just because every other day was lower.
+  ///
+  /// Bars are capped at ``TrendScale/maximumBarWidth`` and left-aligned. Without the cap, a series
+  /// with one or two days stretches each bar across the panel and the pair reads as one wide blue
+  /// pill — a button that does nothing (found on a real two-day ledger).
   private func trend(_ days: [LocalUsageAnalytics.DayPoint]) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack {
@@ -121,22 +125,30 @@ struct LocalUsageSection: View {
           .font(.caption2)
           .foregroundStyle(.tertiary)
       }
-      HStack(alignment: .bottom, spacing: 2) {
-        ForEach(days, id: \.date) { day in
-          let height = TrendScale.cacheHit.height(day.cacheHitRatio)
-          Capsule()
-            .fill(height == nil ? Color.secondary.opacity(0.25) : Color.accentColor)
-            .frame(maxWidth: .infinity)
-            .frame(height: height.map { max(2, $0 * 22) } ?? 2)
-            .accessibilityLabel(
-              "\(day.date): \(MetricFormatting.cacheHitPercent(day.cacheHitRatio))"
-            )
-            .help("\(day.date) · \(MetricFormatting.cacheHitPercent(day.cacheHitRatio))")
+      GeometryReader { proxy in
+        let spacing = Self.trendBarSpacing
+        let width = TrendScale.barWidth(
+          available: proxy.size.width, spacing: spacing, count: days.count)
+        HStack(alignment: .bottom, spacing: spacing) {
+          ForEach(days, id: \.date) { day in
+            let height = TrendScale.cacheHit.height(day.cacheHitRatio)
+            Capsule()
+              .fill(height == nil ? Color.secondary.opacity(0.25) : Color.accentColor.opacity(0.75))
+              .frame(width: width, height: height.map { max(2, $0 * 22) } ?? 2)
+              .accessibilityLabel(
+                "\(day.date): \(MetricFormatting.cacheHitPercent(day.cacheHitRatio))"
+              )
+              .help("\(day.date) · \(MetricFormatting.cacheHitPercent(day.cacheHitRatio))")
+          }
+          Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
       }
-      .frame(height: 24, alignment: .bottom)
+      .frame(height: 24)
     }
   }
+
+  private static let trendBarSpacing: CGFloat = 2
 
   // MARK: - Per model
 
