@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Step 6 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
+**Status:** Step 6 complete · Step 6.5 in progress · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -21,7 +21,7 @@
 | 6 | Name | **DeepTally** (repo `deeptally`) | 0 GitHub name collisions; "DeepSeek" kept in the README, not the product name |
 | 7 | CLI | `deeptally` sharing `DeepTallyCore` | Enables brew **formula** (not cask), scripting, SwiftBar, testability. Renamed from `dtally` — too cryptic |
 | 8 | Repo model | **Git flow** (`main`/`develop`, `feature/*`, `release/*`, `hotfix/*`) + **SemVer** + Conventional Commits | User requirement |
-| 9 | Proxy capture | Deferred to v1.1, opt-in, loopback only | v1 covers the real usage path (opencode) already |
+| 9 | Proxy capture | **Pulled forward 2026-09-26** (was v1.1): opt-in, binds 127.0.0.1 only, forwards to api.deepseek.com only, records counters and never keys or content | DeepSeek has **no usage or spend endpoint** — only `/user/balance` and the per-response `usage` field — and per-harness importers bind the ledger to one client (a pi importer was stopped mid-build for exactly that reason). Capturing at the API boundary is the only harness-agnostic path |
 | 10 | Privacy | Local-only, no telemetry, counters never content | Non-negotiable |
 | 11 | Menu bar metric | **balance** | Glanceable, slow-moving |
 | 12 | Low-balance alert | **$2.00** | User choice; configurable in Settings |
@@ -329,6 +329,32 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     which is inherently Step 7's job.
   **Gate:** `install → uninstall → reinstall` leaves no residue ✅ · the DMG works on a second macOS version ⏳
   human (this machine is the only one available)
+
+### Step 6.5 — API-level usage capture (loopback proxy) ✱
+**Status:** in progress — pulled forward from v1.1 at the user's direction on 2026-09-26
+
+> **Why this step exists.** The popover showed `$0.00` today while the user was actively spending DeepSeek
+> credits through the pi agent. The only local source was opencode's database, which has nothing since
+> 2026-08-29. Two ways out: an importer per harness, or capture at the API boundary. DeepSeek exposes no
+> usage or spend endpoint (only `/user/balance` and the per-response `usage` field — confirmed against the
+> current API docs and a live capture), and a per-harness importer binds the ledger to one client. So the
+> plan's deferred proxy capture (decision 9) moves forward: any OpenAI-compatible client can be pointed at
+> a loopback proxy, and the ledger records the response's own numbers.
+
+- [ ] Core: `ProxyUsage` + `ProxyUsageReader` — reads usage out of a JSON body or an SSE stream, chunk-safe,
+      bounded memory, never retains content (lane X1)
+- [ ] App: opt-in `NWListener` on 127.0.0.1 (default port 8787), forwards to api.deepseek.com only, streams
+      the response through untouched, and records each completion's usage with `source: .proxy`, priced by
+      the same engine as every other row
+- [ ] Settings: a toggle (off by default) and the base URL to point clients at
+- [ ] Docs: `USAGE.md` (pi, opencode, curl examples), `PRIVACY.md` (what transits the proxy — the request
+      body and the Authorization header — and what is stored: counters only, never headers, keys or content),
+      `ARCHITECTURE.md`
+- [ ] Tests: parser units (including byte-by-byte chunk boundaries), forwarding/recording against a stubbed
+      upstream, and a real loopback smoke test
+  **Gate:** a real streaming and a real non-streaming completion through the proxy land one ledger row each
+  whose tokens equal the response's own numbers, and `deeptally usage` shows them; the client's response
+  bytes arrive unchanged.
 
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
