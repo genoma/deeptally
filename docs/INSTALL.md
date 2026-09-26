@@ -40,8 +40,10 @@ checking the hash of what it installed.
 Other flags: `--version X.Y.Z` installs a specific release instead of the latest tag; `--yes` answers the
 "quit the running app?" and "replace the existing install?" questions without a prompt — needed when you
 re-run the piped command to update, because the pipe leaves the script no terminal to ask on;
-`--dmg PATH --sha256 HEX` installs from a DMG you downloaded yourself. `Scripts/install.sh --help` lists them
-all. On any refusal the script prints one sentence to stderr and exits `1`.
+`--dmg PATH --sha256 HEX` installs from a DMG you downloaded yourself (with `--dmg` and no `--sha256`, the
+script reads the `.sha256` file next to the DMG when one exists, which is what `make dmg` writes).
+`Scripts/install.sh --help` lists them all. On any refusal the script prints one sentence to stderr and exits
+`1`.
 
 ## Path 2 — DMG (manual)
 

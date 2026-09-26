@@ -18,7 +18,7 @@ Usage: uninstall.sh [--app PATH] [app flags]
   --yes             do not ask the app for confirmation
   --print-only      show what the app would remove, then stop
   --home PATH       treat PATH as the home directory whose data is removed
-  --keep-data       keep the ledger, preferences and caches
+  --keep-data       keep the ledger and its logs (preferences and caches are still removed)
   --keep-keychain   keep the API key in the Keychain
   --keep-login-item keep the macOS login item registered (the release gate uses this)
   --trash-dir PATH  move the app to PATH instead of the Trash
@@ -40,6 +40,7 @@ Nothing was removed. Remove DeepTally's data by hand (docs/PRIVACY.md):
   rm -rf "$HOME/Library/Application Support/DeepTally"   # the ledger and any Step 2 spike logs
   defaults delete io.github.genoma.deeptally              # all three preference keys above
   rm -rf "$HOME/Library/Caches/io.github.genoma.deeptally"
+  rm -rf "$HOME/Library/Saved Application State/io.github.genoma.deeptally.savedState"
 
 Then open Keychain Access, search for DeepTally, and delete the item (service
 io.github.genoma.deeptally, account api-key) — or run: deeptally key delete

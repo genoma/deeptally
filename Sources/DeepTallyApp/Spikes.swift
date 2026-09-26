@@ -63,7 +63,10 @@ enum Spikes {
         URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         .appending(path: "dist/popover").path
     }
-    // A real popover is 420pt tall and scrolls; pass a taller height to capture the whole body for docs.
+    // A real popover is 420pt tall and scrolls. The height below only pads the captured canvas:
+    // PopoverView pins its own 420pt frame, so the image is the top of the scrolled content and the
+    // sections below the fold are not in it. Capture those with their own render, as the settings
+    // panel does.
     var height = 420.0
     if let first = rest.first, !first.hasPrefix("--") {
       height = Double(first) ?? height

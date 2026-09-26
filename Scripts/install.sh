@@ -38,6 +38,8 @@ Install DeepTally.app from a GitHub release, after verifying the DMG's SHA-256.
   --help           show this help and exit
 
 Downloads come from https://github.com/genoma/deeptally/releases/download/vX.Y.Z/
+With --dmg and no --sha256, the .sha256 file next to the DMG (what 'make dmg' writes)
+is used when it exists.
 USAGE
 }
 
@@ -241,13 +243,19 @@ MOUNTED=1
 [ -d "$MOUNT/${APP_NAME}.app" ] || fail "$DMG_NAME does not contain ${APP_NAME}.app — refusing to install from it"
 
 echo "==> installing to $TARGET_APP"
-rm -rf "$TARGET_APP"
-ditto "$MOUNT/${APP_NAME}.app" "$TARGET_APP" \
-  || fail "could not copy ${APP_NAME}.app to $TARGET_DIR — check free space and permissions"
-if ! codesign --verify --strict "$TARGET_APP" 2>/dev/null; then
-  rm -rf "$TARGET_APP"
+# Copy to a sibling first and swap only after the copy verified: replacing the working install with a
+# half-written one, because the disk filled mid-copy, is the one failure this step must not have.
+STAGED_APP="${TARGET_APP}.installing"
+rm -rf "$STAGED_APP"
+ditto "$MOUNT/${APP_NAME}.app" "$STAGED_APP" \
+  || { rm -rf "$STAGED_APP"; fail "could not copy ${APP_NAME}.app to $TARGET_DIR — check free space and permissions; the existing install was left alone"; }
+if ! codesign --verify --strict "$STAGED_APP" 2>/dev/null; then
+  rm -rf "$STAGED_APP"
   fail "the copied app failed 'codesign --verify --strict' — nothing was installed; download the DMG again"
 fi
+rm -rf "$TARGET_APP"
+mv "$STAGED_APP" "$TARGET_APP" \
+  || { rm -rf "$STAGED_APP"; fail "could not move the verified app into $TARGET_DIR — check permissions"; }
 echo "codesign --verify --strict: ok"
 
 if xattr -p com.apple.quarantine "$TARGET_APP" >/dev/null 2>&1; then

@@ -29,11 +29,17 @@ make kill        # stop a running DeepTally instance
 make smoke       # launch the bundled app and fail if it does not stay alive
 make screenshots # render the real popover to dist/popover*.png
 make verify      # build + test + lint + bundle + codesign --verify
+make install     # install via Scripts/install.sh (ARGS=--user, --dir DIR, --dmg PATH)
+make uninstall   # remove via Scripts/uninstall.sh (ARGS=--print-only, --keep-data)
+make release-assets # build the five release files into dist/ (VERSION=x.y.z)
+make release-check  # verify + release-assets + SHA256SUMS check (VERSION=x.y.z)
 make clean       # remove .build and dist
 ```
 
-`make verify` is the gate a PR has to pass. Still planned in Step 6, and therefore not in the
-[`../Makefile`](../Makefile) yet: `make install`, `make uninstall` and `make release-check`.
+`make verify` is the gate a PR has to pass, and CI runs it on every push and pull request
+([`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)). `make release-check VERSION=x.y.z` is the
+release gate ([`RELEASING.md`](RELEASING.md)); `make install` and `make uninstall` pass `ARGS` through to the
+scripts, which own the work.
 
 ## Visual checks
 

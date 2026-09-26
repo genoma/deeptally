@@ -6,7 +6,7 @@ VERSION ?= 0.1.0
 APP := dist/DeepTally.app
 SWIFT_BUILD := swift build -c release --arch arm64
 
-.PHONY: help build test lint bundle run dmg kill smoke screenshots verify release-assets release-check clean
+.PHONY: help build test lint bundle run dmg kill smoke screenshots verify install uninstall release-assets release-check clean
 
 help:
 	@echo "make build   - release build (app + CLI, arm64)"
@@ -19,6 +19,8 @@ help:
 	@echo "make screenshots - render the real popover to dist/popover[-dark].png"
 	@echo "make run     - bundle and launch the app"
 	@echo "make verify  - build + test + lint + bundle + signature check"
+	@echo "make install - install the app via Scripts/install.sh (ARGS=--user, --dir DIR, --dmg PATH)"
+	@echo "make uninstall - remove it via Scripts/uninstall.sh (ARGS=--print-only, --keep-data)"
 	@echo "make release-assets - build the release files into dist/ (VERSION=x.y.z)"
 	@echo "make release-check  - verify + release-assets + SHA256SUMS check (VERSION=x.y.z)"
 	@echo "make clean   - remove .build and dist"
@@ -63,6 +65,15 @@ screenshots: bundle
 verify: build test lint bundle
 	codesign --verify --strict $(APP)
 	@echo "verify: ok"
+
+# Install or uninstall the app. Both delegate to the shipped scripts so there is one implementation:
+# install.sh verifies a DMG's SHA-256 and installs it; uninstall.sh drives the app's own removal list.
+# ARGS passes through: 'make install ARGS=--user', 'make uninstall ARGS=--print-only'.
+install:
+	./Scripts/install.sh $(ARGS)
+
+uninstall:
+	./Scripts/uninstall.sh $(ARGS)
 
 # Everything .github/workflows/release.yml uploads: DMG, CLI tarball, install.sh, formula, SHA256SUMS.
 release-assets:
