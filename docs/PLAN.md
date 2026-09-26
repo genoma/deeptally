@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Step 5 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
+**Status:** Step 6 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -279,18 +279,56 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   range still shows its aggregate through the rollup reader ✅
 
 ### Step 6 — Release machinery + uninstaller
-- [ ] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam), `dmg.sh`, `install.sh` (hash-pinned, `--user`), **`uninstall.sh`**
-- [ ] In-app *Uninstall DeepTally…*: unregister login item, move app to Trash, purge app-support/prefs/caches,
-      delete the Keychain item, offer a ledger export first
-- [ ] `.github/workflows/ci.yml` (build, test, lint, SPDX-header grep, codesign verify) and `release.yml`
-      (tag → DMG + `SHA256SUMS` + release)
+**Status:** complete — acceptance-reviewed 2026-09-26; two items are human and stay open below
+- [x] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam, used by `bundle.sh`), `dmg.sh`, `install.sh`
+      (hash-pinned, `--user`, `--dir`, `--dmg`, `--sha256`), **`uninstall.sh`** (delegates to the app),
+      `release-assets.sh` and the `make release-assets|release-check|install|uninstall` targets
+- [x] In-app *Uninstall DeepTally…*: unregisters the login item, deletes the Keychain item, purges
+      app-support/prefs/caches/saved state, moves the app to the Trash, and offers **Export CSV First…** —
+      the same `Uninstaller` the headless `DeepTally --uninstall` runs (16 tests, every seam injectable)
+- [x] `.github/workflows/ci.yml` (build, test, lint, SPDX grep, `bash -n` under 3.2, CLI `--version`,
+      codesign verify) and `release.yml` (tag → five artifacts → GitHub Release, refusing an existing
+      release; `workflow_dispatch` is the dry run), plus `DEEPTALLY_LEDGER` already shipped in Step 5
 - [x] User docs written during Steps 3–4: `INSTALL.md`, `UNSIGNED.md`, `PRIVACY.md`, `ARCHITECTURE.md`,
       `DEVELOPMENT.md`, `RELEASING.md`, `USAGE.md`, `SECURITY.md`, `CONTRIBUTING.md`
 - [ ] **Three Gatekeeper dialog screenshots** remain placeholders in `INSTALL.md`; they need a human to click
       through a quarantined first launch on macOS 27
-- [ ] Homebrew **formula** tap for `deeptally` only; GitHub Immutable Releases enabled
-  **Gate:** `install → uninstall → reinstall` leaves no residue (verified with a throwaway `HOME`), and the DMG
-  works on a second macOS version.
+- [x] Homebrew formula **generated** per release (`dist/deeptally.rb`, tarball URL + SHA-256, `libexec` +
+      symlink so the CLI finds its resource bundle) and the tap procedure documented; the tap repository
+      itself is created with the first release, because a formula before its artifact exists would 404.
+      **GitHub Immutable Releases enabled** on the repository (API `PUT /immutable-releases`, `enabled: true`)
+
+  **Gate evidence (2026-09-26, all observed):**
+  - **`install → uninstall → reinstall` leaves no residue.** `/tmp/deeptally-step6-gate.sh`, against a
+    throwaway `--dir` and `--home`: `make release-assets VERSION=0.0.1` writes five artifacts whose
+    `SHA256SUMS` verifies; the CLI tarball runs under `env -i` and reads its bundled price table; the formula
+    pins version, url and the tarball's SHA-256; install verifies the DMG hash, verifies
+    `codesign --verify --strict`, and the bundle lands in the throwaway prefix; a wrong `--sha256` refuses
+    and installs nothing; `--print-only` changes nothing; the uninstall (with `--keep-keychain` and
+    `--keep-login-item`, so the machine running the gate is untouched) removes app support, preferences,
+    caches and saved state, moves the bundle to the throwaway Trash, and leaves two bystander files intact;
+    reinstall is clean.
+  - **The release workflow runs end to end.** Dry run on a throwaway branch
+    ([run 36227866864](https://github.com/genoma/deeptally/actions/runs/36227866864), macOS-26, 2m37s):
+    version + CHANGELOG validation, `make release-check` (verify, assets, checksums), release-notes
+    extraction, and the dry-run step; the publish step was correctly skipped and nothing was uploaded.
+  - **CI runs on every push.** [Run 36227504013](https://github.com/genoma/deeptally/actions/runs/36227504013):
+    `make verify`, SPDX headers, `bash -n` under `/bin/bash` 3.2, CLI `--version` — green in 2m38s. Both
+    workflows register as `active` on the repository.
+  - **Independent review (fresh context, read-only):** one P1 and four P2s, all closed — the `--keep-data`
+    help text described keeping preferences and caches (it keeps only app data), `install.sh` removed the
+    working app before copying the new one (now staged and swapped after verification), the manual-removal
+    text omitted saved state, `DEVELOPMENT.md` still called `make install|uninstall|release-check` planned
+    (targets added, docs updated), and the local `.sha256` sidecar was undocumented. The reviewer could not
+    run scripts; the parent re-ran the full gate after the fixes.
+  - **Known limitations, tracked rather than hidden:** the real `NSWorkspace.recycle` branch and the
+    real-home `removePersistentDomain` branch have no automated coverage (tests and the gate inject a trash
+    directory and a home); the real Trash move was probed once in a scratch binary, and
+    `DeepTally --uninstall --print-only` exercises the real-path plan without changing anything. The
+    publish step (`gh release create` under immutability) has never run: the first tag is its first run,
+    which is inherently Step 7's job.
+  **Gate:** `install → uninstall → reinstall` leaves no residue ✅ · the DMG works on a second macOS version ⏳
+  human (this machine is the only one available)
 
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
@@ -363,6 +401,10 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | A partly covered UTC day (Step 5) | **named as unavailable only when `daily` holds rows for it**; a day with nothing in either store contributes nothing and is not listed — a note about a day with no usage would read as missing data |
 | New JSON keys (Step 5) | **snake_case** (`rollup_days`, `unavailable_days`), like every other multiword key in the `usage` document |
 | Pointing the CLI at another ledger (Step 5) | **`DEEPTALLY_LEDGER=<path>`**: `HOME` does not redirect application support, so this is the one safe way to try `ledger prune`/`ledger reprice` on a copy. It exists because a gate script of mine got this wrong and pruned the real ledger (see the log) |
+| Release tamper-protection (Step 6) | **Immutable Releases enabled** on the repository (`PUT /immutable-releases`, verified `enabled: true`): a published tag and its assets cannot be edited or deleted, so a bad release gets the next patch version, never a re-upload |
+| Uninstaller ownership (Step 6) | **The Swift `Uninstaller` owns the removal list**; `Scripts/uninstall.sh` execs `DeepTally --uninstall`, so the popover button and the script cannot drift. `--keep-login-item`/`--keep-keychain` exist so the release gate never touches the machine that runs it |
+| Install-time trust (Step 6) | `install.sh` verifies the DMG's SHA-256 **before** mounting and `codesign --verify --strict` **after** copying; quarantine is cleared only on a verified install, and a new copy is staged and swapped so a failed copy leaves the working app alone |
+| Homebrew tap timing (Step 6) | The **tap repository is created with the first release**; `release-assets.sh` renders `dist/deeptally.rb` per version. A formula published before its artifact exists would 404 |
 
 ## 10. Progress log
 
@@ -392,3 +434,6 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 5 | **Operational mistake of mine, recovered, and turned into a feature.** The first gate script pointed the CLI at a copy with `HOME=...`; macOS resolves the application-support directory from the real home, so `ledger prune --days 30` deleted **4,936 raw rows from the real ledger** (rollups and watermark untouched). `deeptally import --full` re-inserted exactly those rows — "Imported 4936 new rows of 5275 offered" — and the long-window totals are byte-identical to the pre-accident ones ($14.378060 · 5,275 requests · 859,652,607 prompt tokens). The durable fix is `DEEPTALLY_LEDGER=<path>` (`2423fea`), documented in the help and USAGE.md with the `HOME` trap named. An earlier "verification" of mine had checked the report but not the ledger path the CLI printed; the check that failed is now a test. |
 | 2026-09-26 | 5 | **Step 5 gate passed** (harness `/tmp/deeptally-step5-gate.sh`, real ledger): window numbers identical before/after a 30-day prune; the long window reports 13 rollup days with no spurious unavailable day; the 30-day window matches the exported raw rows to the micro-dollar (spend 0.424729, 279 requests, 41,601,554 prompt tokens, 99.2% cache hit); `csvRoundTrips` compares the `daily` tables between a source ledger and a fresh ledger imported from its export — identical. |
 | 2026-09-26 | 5 | Independent read-only review of `2351178..2423fea` (fresh context): **no code defect**; five documentation gaps, all closed — the stale "after Step 4" status paragraphs, an overstated provider-filter day contract (tightened in code rather than documented as a wart), a comment about CSV error text, and two comments still naming the settings panel as the caveat's home. The reviewer had no shell, so the parent re-ran its three mutation checks in a disposable clone: each reverted fix makes its guarding test fail. Step 5 closed. |
+| 2026-09-26 | 6 | Wave 1 lanes merged: **release scripts** (`sign.sh`, `install.sh`, `uninstall.sh`, `release-assets.sh`, Make targets), **CI workflows**, **in-app uninstaller** (363 tests: 242 core + 38 CLI + 83 app). First real CI run green on macOS-26 in 2m38s; both workflows registered `active`; **Immutable Releases enabled** via the repository API. Docs lane merged on top, turning every "planned (Step 6)" sentence into the shipped commands and fixing a real trap: `SHA256SUMS` lists four files, so a DMG-only download needs the grep form. |
+| 2026-09-26 | 6 | **Release dry run, first end-to-end execution of the release workflow** (run 36227866864, 2m37s, throwaway branch since the CHANGELOG heading is required): version + CHANGELOG validation, `make release-check`, release-notes extraction, dry-run stop. Nothing was published; the branch was deleted. The publish step itself runs first at the v0.1.0 tag, which is Step 7's job. |
+| 2026-09-26 | 6 | **Step 6 gate passed:** install into a throwaway prefix (hash verified, signature verified, wrong hash refused), print-only a no-op, uninstall with `--keep-keychain`/`--keep-login-item` leaving no residue and both bystanders intact, reinstall clean; the CLI tarball runs under `env -i`; the formula pins version, url and tarball hash. Independent read-only review found one P1 (the `--keep-data` help text promised to keep preferences and caches; it keeps only app data) and four P2s — `install.sh` deleting the working app before a possibly failing copy (now staged and swapped), the manual-removal text missing saved state, a stale `DEVELOPMENT.md` and the missing `make install|uninstall` targets, and an undocumented local `.sha256` source. All fixed, gate re-run green. **Still human:** the three Gatekeeper dialog screenshots and the DMG on a second macOS version. |
