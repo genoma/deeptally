@@ -59,8 +59,7 @@ binary and `DeepTally_DeepTallyCore.bundle` from the archive together in a direc
 
 **Uninstall** — the popover's **Uninstall DeepTally…** button removes the login item, the Keychain item,
 `~/Library/Application Support/DeepTally`, the preferences domain, caches and saved state, and moves the
-app to the Trash. If an older version left a usage ledger in that application-support directory, this is
-what deletes it; the current app never reads or writes it, and nothing else changes.
+app to the Trash. Nothing else changes.
 [`docs/INSTALL.md`](docs/INSTALL.md#uninstalling) describes each step and the `Scripts/uninstall.sh`
 route for source builds.
 

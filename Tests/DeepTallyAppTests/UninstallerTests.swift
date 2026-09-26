@@ -438,7 +438,7 @@ struct UninstallScenery {
     trash = root.appending(path: "Trash", directoryHint: .isDirectory)
     appSupport = home.appending(
       path: "Library/Application Support/DeepTally", directoryHint: .isDirectory)
-    oldDataFile = appSupport.appending(path: "ledger.sqlite")
+    oldDataFile = appSupport.appending(path: "launch.log")
     preferences =
       home
       .appending(path: "Library/Preferences", directoryHint: .isDirectory)
@@ -463,11 +463,9 @@ struct UninstallScenery {
     ]
 
     // Every item the plan removes, in the shape macOS would leave it: an app-data directory holding
-    // a few files an older install may have written, a plist, two directories with content inside.
+    // the files the app really writes, a plist, two directories with content inside.
     try manager.createDirectory(at: appSupport, withIntermediateDirectories: true)
-    for name in ["ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "launch.log"] {
-      try Data("x".utf8).write(to: appSupport.appending(path: name))
-    }
+    try Data("x".utf8).write(to: appSupport.appending(path: "launch.log"))
     try Data("{}".utf8).write(to: appSupport.appending(path: "last-launch.json"))
     try Data("".utf8).write(to: appSupport.appending(path: "spike-enabled"))
     try manager.createDirectory(

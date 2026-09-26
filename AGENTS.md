@@ -120,9 +120,6 @@ The release targets `install`, `uninstall`, `release-assets` and `release-check`
 | API key | Keychain, service `io.github.genoma.deeptally`, account `api-key`; `DEEPSEEK_API_KEY` as fallback | never written anywhere else |
 | Preferences | `~/Library/Preferences/io.github.genoma.deeptally.plist` | settings, last balance reading, last alert time; the app writes no usage data |
 
-An older version kept a usage ledger at `~/Library/Application Support/DeepTally/ledger.sqlite`. The current
-app never reads or writes that directory; the uninstaller removes it whole (see `docs/PRIVACY.md`).
-
 ## 7. Git flow and versioning
 
 - `main` = released code only. `develop` = integration (GitHub default branch).

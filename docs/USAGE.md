@@ -286,9 +286,8 @@ exactly what is about to go:
 
 1. the **login item** (Launch at login), so nothing tries to start DeepTally again;
 2. the **API key** — the Keychain item behind *API key: Keychain* in the footer;
-3. `~/Library/Application Support/DeepTally` — the app's data directory, removed whole. The current app
-   never writes it; an older version may have left a usage ledger and its side files there, and this is what
-   removes them;
+3. `~/Library/Application Support/DeepTally` — the app's data directory, removed whole. It holds only
+   the app's launch diagnostics;
 4. the preferences domain `io.github.genoma.deeptally` (the settings, the last balance reading and the last
    alert time);
 5. `~/Library/Caches/io.github.genoma.deeptally`;
@@ -342,7 +341,7 @@ error. It is the same code the button runs, and the same list.
 | *"Pricing data problem: …"* / *"Holiday data problem: …"* | The bundled price table (`Sources/DeepTallyCore/Resources/PriceTable.json`) or the holiday list (`Sources/DeepTallyCore/Resources/ChinaHolidays.json`) could not be read. Prices are data, so the app suppresses the rate panel instead of inventing numbers. Your override at `~/.config/deeptally/PriceTable.json` is different: it wins when it is valid, and an invalid override is ignored in favour of the bundled table rather than suppressing prices. |
 | The rate looks wrong on a holiday | The shipped calendar holds the official 2026 Chinese State Council dates; other years are not included. Extra dates can be merged in through the `holidays` array of your `~/.config/deeptally/PriceTable.json`. |
 | What does *"estimated"* mean? | The rates are **estimates of what a request would cost**: prices are computed locally from the versioned price table with the peak/off-peak windows. Model line-ups and prices changed three times in 2026, and the app cannot see what any other client actually sent. DeepSeek's own billing is the only authoritative figure, and there is no API for it. The balance is not an estimate — it comes straight from `GET /user/balance`. |
-| Where has my usage history gone? | There never was an API-only source for it, and this app does not keep one. An older version may have left a usage ledger in `~/Library/Application Support/DeepTally`; the current app never reads or writes it. If you want a copy, copy the directory before running the uninstaller — which is what deletes it. |
+| Where is the usage history? | There is none anywhere: DeepSeek exposes no usage or spend endpoint, and this app keeps no local ledger. It shows the account balance and the rates that explain what a request costs — not spend history. |
 
 ---
 

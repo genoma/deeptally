@@ -191,8 +191,8 @@ struct Uninstaller {
     }
   }
 
-  /// The app data directory, removed whole: an older install may have left a ledger, its side files
-  /// and the Step 2 logs there, and one removal covers all of it without naming any of them.
+  /// The app data directory, removed whole: it holds the launch diagnostics, and one removal covers
+  /// all of it without naming any file.
   private func appDataLine(performing: Bool) -> Report.Line {
     let url = appDataURL
     guard !options.keepsData else {

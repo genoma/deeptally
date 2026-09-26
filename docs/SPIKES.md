@@ -63,4 +63,4 @@ marker file exists — the shipped app never creates it.
 
 - **S6** made the `curl` install path the primary recommendation in `INSTALL.md`: it sidesteps
   Gatekeeper entirely because it never sets the quarantine attribute.
-- **S7** confirmed there is no historical usage API, which is why the ledger is local-first.
+- **S7** confirmed there is no historical usage API, which is why the app shows the balance and the rates rather than spend history.

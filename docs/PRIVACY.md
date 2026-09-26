@@ -47,7 +47,6 @@ reading's own amounts ([What is stored on disk](#what-is-stored-on-disk)).
 | API key | One Keychain item: service `io.github.genoma.deeptally`, account `api-key` | Generic password, accessible while the login keychain is unlocked. Never in a file, a preference or a log. |
 | Login item | Registered through `SMAppService` (system-managed) | Removed by the uninstaller, or by turning **Launch at login** off. |
 | Saved window state | `~/Library/Saved Application State/io.github.genoma.deeptally.savedState` | Written by macOS, not by DeepTally: AppKit's window restoration, which remembers window placement. DeepTally has one popover and no documents, so this folder often never exists; it holds no usage data. Removed by the uninstaller when it does. |
-| Older app data | `~/Library/Application Support/DeepTally` | **Not written by the current app.** An older version may have left a usage ledger (`ledger.sqlite` and its side files) and Step 2 launch logs there. The current app never reads or writes the directory; the uninstaller removes it whole, and you can delete it by hand at any time. |
 
 Never stored, anywhere: prompt or completion content, request or response bodies, or your DeepSeek password
 — DeepTally only ever uses an API key. The balance reading it persists holds amounts and a timestamp, nothing

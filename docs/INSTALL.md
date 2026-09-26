@@ -164,8 +164,8 @@ confirmation lists everything it will remove. Then, in order:
 
 1. unregisters the **login item** (`Launch at login`);
 2. deletes the **API key** from the Keychain;
-3. removes `~/Library/Application Support/DeepTally` — the app's data directory, including anything an older
-   version left there (a usage ledger, launch logs);
+3. removes `~/Library/Application Support/DeepTally` — the app's data directory, which holds the launch
+   logs and nothing else;
 4. removes the **preferences** domain `io.github.genoma.deeptally`;
 5. removes `~/Library/Caches/io.github.genoma.deeptally`;
 6. removes `~/Library/Saved Application State/io.github.genoma.deeptally.savedState`, when macOS wrote one;
