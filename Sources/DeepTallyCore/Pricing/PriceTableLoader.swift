@@ -20,9 +20,9 @@ public enum PricingDataError: Swift.Error, Equatable, Sendable {
   case noModels
   /// `off_peak_multiplier` must be in `(0, 1]`.
   case invalidOffPeakMultiplier(Decimal)
-  /// A price must be strictly positive. A zero or negative amount would bill every request that
-  /// resolves to the model at nothing while the row still counts as priced, and a reprice would
-  /// then write those zeros over previously good costs. `field` names the JSON key, `model` the row.
+  /// A price must be strictly positive. A zero or negative amount would needlessly list a model at
+  /// nothing, and a hand-edited table would then read as if the model were free. `field` names the
+  /// JSON key, `model` the row.
   case invalidPrice(model: String, field: PriceField, value: Decimal)
   /// A peak window must satisfy `0 <= start < end <= 24`.
   case invalidPeakWindow(startHourUTC: Int, endHourUTC: Int)

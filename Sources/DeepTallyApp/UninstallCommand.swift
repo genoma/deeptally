@@ -43,7 +43,7 @@ enum UninstallCommand {
     Removes, in this order:
       1. the login item (Launch at login)
       2. the DeepSeek API key, the Keychain item
-      3. ~/Library/Application Support/DeepTally (the ledger and any Step 2 logs)
+      3. ~/Library/Application Support/DeepTally (the app's data directory)
       4. the preferences domain io.github.genoma.deeptally
       5. ~/Library/Caches/io.github.genoma.deeptally
       6. ~/Library/Saved Application State/io.github.genoma.deeptally.savedState, when present
@@ -54,7 +54,7 @@ enum UninstallCommand {
       --yes             the caller has already asked the user: this command never prompts
       --print-only      print the plan and change nothing (always exits 0)
       --home PATH       treat PATH as the home directory (tests and the release gate)
-      --keep-data       keep the ledger and the Step 2 logs
+      --keep-data       keep ~/Library/Application Support/DeepTally
       --keep-keychain   keep the API key in the Keychain
       --keep-login-item leave the macOS login item registered (the release gate: no side effect on
                         the machine running it)

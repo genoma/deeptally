@@ -76,9 +76,9 @@ final class StatusItemController {
     button.toolTip = presentation.tooltip
   }
 
-  /// Observation rather than a callback from the model: the title follows `menuBarLabel`, which
-  /// includes the user's `menuBarMetric` setting, and it has to react to a refresh the model started
-  /// on its own timer. Re-armed after every change, so one subscription covers the process lifetime.
+  /// Observation rather than a callback from the model: the title follows `menuBarLabel`, which is
+  /// the account balance, and it has to react to a refresh the model started on its own timer.
+  /// Re-armed after every change, so one subscription covers the process lifetime.
   private func observeLabel() {
     withObservationTracking {
       _ = model.menuBarPresentation

@@ -47,19 +47,16 @@ final class TestClock {
   }
 }
 
-/// The timers as a test double: it records the delay the model computed and the ticker intervals, and
-/// fires the callbacks when the test asks — so nothing here waits out a poll or an import.
+/// The timers as a test double: it records the delay the model computed and the ticker interval, and
+/// fires the callbacks when the test asks — so nothing here waits out a poll.
 @MainActor
 final class TestScheduler: AppScheduling {
   /// Every delay the model asked for, oldest first.
   private(set) var refreshDelays: [TimeInterval] = []
   private(set) var tickerInterval: TimeInterval?
-  /// The interval the ledger ticker was armed with, and therefore the constant the app imports on.
-  private(set) var ledgerInterval: TimeInterval?
   private(set) var cancels = 0
   private var refreshRun: (@MainActor () -> Void)?
   private var tickRun: (@MainActor () -> Void)?
-  private var ledgerRun: (@MainActor () -> Void)?
 
   var lastRefreshDelay: TimeInterval? { refreshDelays.last }
 
@@ -73,18 +70,10 @@ final class TestScheduler: AppScheduling {
     tickRun = tick
   }
 
-  func startLedgerTicker(
-    every interval: TimeInterval, _ ledgerTick: @escaping @MainActor () -> Void
-  ) {
-    ledgerInterval = interval
-    ledgerRun = ledgerTick
-  }
-
   func cancel() {
     cancels += 1
     refreshRun = nil
     tickRun = nil
-    ledgerRun = nil
   }
 
   /// Runs the refresh the model scheduled, without waiting for its delay.
@@ -95,11 +84,6 @@ final class TestScheduler: AppScheduling {
   /// Runs one tick, as the 30-second ticker would.
   func fireTick() {
     tickRun?()
-  }
-
-  /// Runs one ledger pass, as the fifteen-minute ticker would.
-  func fireLedgerTick() {
-    ledgerRun?()
   }
 }
 
@@ -278,32 +262,6 @@ final class LoginItemStub {
   }
 }
 
-// MARK: - The usage proxy
-
-/// A `UsageProxyServing` the test drives: what `start` was asked for, what it answers, and how often
-/// the model stopped it.
-///
-/// `@MainActor` rather than an actor because the model calls it from the main actor and the test
-/// asserts from there too; the methods are `async` because the protocol is. Injecting this is what
-/// keeps the model's toggle testable without binding a socket.
-@MainActor
-final class StubUsageProxy: UsageProxyServing {
-  /// What `start` answers. `nil` means "it bound the port it was asked for".
-  var outcome: UsageProxyStart?
-  /// Every port `start` was asked for, oldest first.
-  private(set) var startedPorts: [Int] = []
-  private(set) var stopCount = 0
-
-  func start(port: Int) async -> UsageProxyStart {
-    startedPorts.append(port)
-    return outcome ?? .listening(port: port)
-  }
-
-  func stop() async {
-    stopCount += 1
-  }
-}
-
 // MARK: - Keys
 
 /// The key situation a test wants, without touching the developer's Keychain.
@@ -348,88 +306,6 @@ func testKeySource(
   }
 }
 
-// MARK: - Local usage
-
-/// A `UsageImporting` the test drives: the rows it offers, the instants it was asked to resume from,
-/// and an error once told to fail.
-///
-/// `Mutex` rather than an actor for the same reason as ``StubBalanceFetcher``: the import runs inside
-/// the ledger actor while the test asserts from the main actor, and synchronous accessors let an
-/// assertion read the call log without an `await` that could itself let the import make progress.
-final class StubUsageSource: UsageImporting, Sendable {
-  struct State: Sendable {
-    var records: [OpenCodeImporter.ImportedRecord] = []
-    /// The watermark each scan was asked to resume from, oldest first (`nil` = full scan).
-    var resumeInstants: [Date?] = []
-    var fails = false
-  }
-
-  private let state: Mutex<State>
-
-  init(records: [OpenCodeImporter.ImportedRecord] = []) {
-    state = Mutex(State(records: records))
-  }
-
-  var source: UsageSource { .opencode }
-
-  /// Offers `records` from the next scan on. The ledger dedupes, so re-offering a row is harmless.
-  func offer(_ records: [OpenCodeImporter.ImportedRecord]) {
-    state.withLock { $0.records = records }
-  }
-
-  /// Makes every later scan fail, the way a missing or unreadable opencode database does.
-  func failFromNowOn() {
-    state.withLock { $0.fails = true }
-  }
-
-  var scanCount: Int { state.withLock { $0.resumeInstants.count } }
-  var resumeInstants: [Date?] { state.withLock { $0.resumeInstants } }
-
-  func importAll(since: Date?) throws -> OpenCodeImporter.ImportResult {
-    try state.withLock { state in
-      state.resumeInstants.append(since)
-      if state.fails {
-        throw OpenCodeImporter.ImportError.databaseMissing(path: "/stub/opencode.db")
-      }
-      return OpenCodeImporter.ImportResult(
-        records: state.records, latestSeen: state.records.map(\.record.timestamp).max())
-    }
-  }
-}
-
-/// One importable row. The ledger stores the cost the source hands it, so a fake source sets the
-/// spend directly; the hit/miss split is what the cache-hit ratio is computed from.
-func importedRecord(
-  at timestamp: Date,
-  model: String = "deepseek-flash",
-  cacheHitTokens: Int = 750,
-  cacheMissTokens: Int = 250,
-  completionTokens: Int = 200,
-  costUSD: Decimal,
-  rawHash: String = UUID().uuidString
-) -> OpenCodeImporter.ImportedRecord {
-  let usage = TokenUsage(
-    promptTokens: cacheHitTokens + cacheMissTokens,
-    completionTokens: completionTokens,
-    cacheHitTokens: cacheHitTokens,
-    cacheMissTokens: cacheMissTokens)
-  return OpenCodeImporter.ImportedRecord(
-    record: UsageRecord(
-      timestamp: timestamp, source: .opencode, provider: .deepseek, model: model, usage: usage,
-      costUSD: costUSD, sessionID: "stub-session"),
-    rawHash: rawHash)
-}
-
-/// A ledger path under the temporary directory. The app-layer tests run the real import flow, so they
-/// must never open the developer's ledger — and one file per fixture is left to the system's temp
-/// cleanup, which a `UserDefaults` domain could not rely on (AGENTS.md §9.12).
-func temporaryLedgerURL() -> URL {
-  FileManager.default.temporaryDirectory
-    .appending(path: "deeptally-app-tests", directoryHint: .isDirectory)
-    .appending(path: UUID().uuidString, directoryHint: .isDirectory)
-    .appending(path: "ledger.sqlite")
-}
-
 // MARK: - The model under test
 
 /// One `AppModel` with every seam stubbed, plus the stubs themselves.
@@ -441,11 +317,6 @@ struct AppModelFixture {
   let alerts: StubAlertScheduler
   let clock: TestClock
   let loginItem: LoginItemStub
-  /// The rows the ledger pass imports, so a test can see how often and from where it scanned.
-  let usageSource: StubUsageSource
-  /// The file this fixture's ledger lives in, for the tests that prune or inspect it directly.
-  /// Always a temporary path; `makeFixture` never opens the developer's ledger.
-  let ledgerURL: URL
 }
 
 /// Builds the model a test drives.
@@ -455,23 +326,14 @@ struct AppModelFixture {
 /// environment of the process that happens to run the suite — a shell with `DEEPSEEK_API_KEY` exported
 /// must not decide what the app layer resolves.
 ///
-/// The ledger is always a temporary file and the importer is always ``usageSource``, so a test that
-/// calls `start()` exercises the real import flow without touching the developer's ledger or reading
-/// the real opencode database. `ledgerURL` overrides the file for the tests that need the ledger to
-/// be unopenable. `uninstaller` overrides the removal path for the same reason: without it the model
-/// would build the shipping one, which acts on this Mac's real home, Trash, Keychain and login item.
-/// `usageProxy` is the listener seam, so a test that enables the setting never binds a socket: with
-/// `nil` the model builds the shipping server lazily, and only if the setting is on.
+/// `uninstaller` overrides the removal path: without it the model would build the shipping one, which
+/// acts on this Mac's real home, Trash, Keychain and login item.
 @MainActor
 func makeFixture(
   defaults: UserDefaults,
   outcome: StubBalanceFetcher.Outcome = .balance(usdBalance("12.34")),
   key: APIKeySource = testKeySource(.environment(testEnvironmentKey)),
   settings: AppSettings = .default,
-  ledgerURL: URL? = nil,
-  usageSource: StubUsageSource = StubUsageSource(),
-  costing: (any RowCosting)? = nil,
-  usageProxy: (any UsageProxyServing)? = nil,
   uninstaller: Uninstaller? = nil
 ) -> AppModelFixture {
   SettingsStore(defaults: defaults).save(settings)
@@ -486,21 +348,12 @@ func makeFixture(
       homeDirectory: URL(fileURLWithPath: "/nonexistent-deeptally-tests")),
     // Every request lands on the stub, so no test can reach the network.
     makeFetcher: { key in fetcher.binding(for: key) },
-    timeZone: TimeZone(identifier: "UTC")!,
-    ledgerURL: ledgerURL ?? temporaryLedgerURL(),
-    // Belt and braces: the injected ledger never builds this importer, and if a future test forgets
-    // to inject one this path cannot exist either, so the real opencode database stays unread.
-    openCodeDatabaseURL: URL(fileURLWithPath: "/nonexistent-deeptally-tests/opencode.db")
+    timeZone: TimeZone(identifier: "UTC")!
   )
   let scheduling = TestScheduler()
   let alerts = StubAlertScheduler()
   let clock = TestClock()
   let loginItem = LoginItemStub()
-  let ledger = LocalUsageLedger(
-    ledgerURL: environment.ledgerURL,
-    priceTable: environment.priceTable,
-    makeSource: { [usageSource] in usageSource },
-    costing: costing)
   let model = AppModel(
     environment: environment,
     scheduler: alerts,
@@ -510,13 +363,11 @@ func makeFixture(
     // Jitter is real runtime behaviour, not the model's arithmetic: pinned to zero so a recorded
     // delay is exactly `PollingPlan`'s backoff.
     jitterFraction: { 0 },
-    localUsageLedger: ledger,
-    usageProxy: usageProxy,
     uninstaller: uninstaller
   )
   return AppModelFixture(
     model: model, fetcher: fetcher, scheduling: scheduling, alerts: alerts, clock: clock,
-    loginItem: loginItem, usageSource: usageSource, ledgerURL: environment.ledgerURL)
+    loginItem: loginItem)
 }
 
 // MARK: - Waiting

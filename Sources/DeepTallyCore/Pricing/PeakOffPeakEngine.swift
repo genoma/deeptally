@@ -45,7 +45,7 @@ public struct PeakOffPeakEngine: Sendable {
   }
 
   /// The price factor in force at `date`. Cheaper than `classify(_:)`, which also searches for the
-  /// next transition; the cost engine needs only this, once per ledger row.
+  /// next transition; the rate panel needs only this.
   func multiplier(at date: Date) -> Decimal {
     multiplier(for: period(at: date))
   }

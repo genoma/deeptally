@@ -706,64 +706,11 @@ struct PeakOffPeakEngineTests {
   }
 }
 
-// MARK: - Cost
+// MARK: - Rates
 
-@Suite("Cost engine")
-struct CostEngineTests {
+@Suite("Rate engine")
+struct RateEngineTests {
   private let engine = CostEngine(table: fixtureTable())
-
-  private var millionOfEach: TokenUsage {
-    TokenUsage(
-      promptTokens: 2_000_000,
-      completionTokens: 1_000_000,
-      cacheHitTokens: 1_000_000,
-      cacheMissTokens: 1_000_000
-    )
-  }
-
-  @Test("flash: 1M hit + 1M miss + 1M output at peak costs 1.506 USD")
-  func flashPeakCost() {
-    let cost = engine.cost(
-      model: "deepseek-flash", usage: millionOfEach, at: instant("2026-09-28T02:30:00Z"))
-    #expect(cost == Decimal.parse("1.506"))
-  }
-
-  @Test("the same request costs half off-peak")
-  func flashOffPeakCost() {
-    let cost = engine.cost(
-      model: "deepseek-flash", usage: millionOfEach, at: instant("2026-09-28T12:00:00Z"))
-    #expect(cost == Decimal.parse("0.753"))
-    #expect(cost == Decimal.parse("1.506") * Decimal.parse("0.5"))
-  }
-
-  @Test("pro pricing uses the pro row")
-  func proPeakCost() {
-    let cost = engine.cost(
-      model: "deepseek-v4-pro", usage: millionOfEach, at: instant("2026-09-28T02:30:00Z"))
-    #expect(cost == Decimal.parse("5.324"))
-  }
-
-  @Test("fractional token counts scale linearly")
-  func fractionalTokens() {
-    let usage = TokenUsage(
-      promptTokens: 750_000,
-      completionTokens: 125_000,
-      cacheHitTokens: 500_000,
-      cacheMissTokens: 250_000
-    )
-    let cost = engine.cost(
-      model: "deepseek-flash", usage: usage, at: instant("2026-09-28T02:30:00Z"))
-    #expect(cost == Decimal.parse("0.228"))
-  }
-
-  @Test("a holiday is priced off-peak")
-  func holidayIsOffPeak() {
-    let holidayEngine = CostEngine(
-      table: fixtureTable(), holidayCalendar: HolidayCalendar(dates: ["2026-09-28"]))
-    let cost = holidayEngine.cost(
-      model: "deepseek-flash", usage: millionOfEach, at: instant("2026-09-28T02:30:00Z"))
-    #expect(cost == Decimal.parse("0.753"))
-  }
 
   @Test("current rates carry the period multiplier")
   func currentRates() {
@@ -778,24 +725,22 @@ struct CostEngineTests {
     #expect(offPeak.output == Decimal.parse("0.60"))
   }
 
-  @Test("an unknown model prices at zero")
-  func unknownModel() {
-    let cost = engine.cost(
-      model: "deepseek-v9", usage: millionOfEach, at: instant("2026-09-28T02:30:00Z"))
-    #expect(cost == .zero)
+  @Test("a holiday is priced off-peak")
+  func holidayIsOffPeak() {
+    let holidayEngine = CostEngine(
+      table: fixtureTable(), holidayCalendar: HolidayCalendar(dates: ["2026-09-28"]))
+    let rates = holidayEngine.currentRates(
+      model: "deepseek-flash", at: instant("2026-09-28T02:30:00Z"))
+    #expect(rates.cacheHit == Decimal.parse("0.003"))
+    #expect(rates.cacheMiss == Decimal.parse("0.15"))
+    #expect(rates.output == Decimal.parse("0.60"))
+  }
 
+  @Test("an unknown model has no rates")
+  func unknownModel() {
     let rates = engine.currentRates(model: "deepseek-v9", at: instant("2026-09-28T02:30:00Z"))
     #expect(rates.cacheHit == 0)
     #expect(rates.cacheMiss == 0)
     #expect(rates.output == 0)
-  }
-
-  @Test("zero usage costs nothing")
-  func zeroUsage() {
-    let usage = TokenUsage(
-      promptTokens: 0, completionTokens: 0, cacheHitTokens: 0, cacheMissTokens: 0)
-    #expect(
-      engine.cost(model: "deepseek-flash", usage: usage, at: instant("2026-09-28T02:30:00Z"))
-        == .zero)
   }
 }

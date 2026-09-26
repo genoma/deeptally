@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-/// Prices token usage at whatever rate was in force when the request happened.
-///
-/// DeepSeek bills cache hits, cache misses and output. Cache *writes* are recorded upstream by the
-/// ledger but are never billed, so they cannot appear in this formula.
+/// Answers the peak/off-peak question and the effective prices the rate panel shows.
 public struct CostEngine: Sendable {
-  /// The peak/off-peak decision this engine prices with.
+  /// The peak/off-peak decision this engine resolves rates with.
   public let peakOffPeak: PeakOffPeakEngine
 
   private let table: PriceTable
@@ -24,22 +21,9 @@ public struct CostEngine: Sendable {
     )
   }
 
-  /// USD for one request: `(hit*hit + miss*miss + output*out) / 1M * multiplier`.
-  ///
-  /// Reasoning tokens are billed as output and are already inside `usage.completionTokens`. A model
-  /// absent from the table (retired or renamed) costs `.zero`; callers that must tell "unpriced"
-  /// from "free" should check `table.price(forModel:)` first.
-  public func cost(model: String, usage: TokenUsage, at date: Date) -> Decimal {
-    guard let price = table.price(forModel: model) else { return .zero }
-    let peakCost =
-      (Decimal(usage.cacheHitTokens) * price.cacheHitUSDPerMillion
-        + Decimal(usage.cacheMissTokens) * price.cacheMissUSDPerMillion
-        + Decimal(usage.completionTokens) * price.outputUSDPerMillion) / Self.tokensPerMillion
-    return peakCost * peakOffPeak.multiplier(at: date)
-  }
-
   /// The effective hit / miss / output prices in USD per 1M tokens right now, multiplier included.
-  /// `.zero` for a model absent from the table, matching ``cost(model:usage:at:)``.
+  /// `.zero` for a model absent from the table: an unpriced model has no rate to show, never a
+  /// guessed one.
   public func currentRates(
     model: String,
     at date: Date
@@ -52,6 +36,4 @@ public struct CostEngine: Sendable {
       price.outputUSDPerMillion * multiplier
     )
   }
-
-  private static let tokensPerMillion = Decimal(1_000_000)
 }

@@ -11,7 +11,7 @@ import UserNotifications
 /// Step 2 spike helpers. Each command prints one JSON line to stdout and exits; none of this runs
 /// on the normal app path. Protocol and results: `docs/SPIKES.md`.
 ///
-/// Usage (from inside the bundle, so bundle identity exists):
+/// Invocation (from inside the bundle, so bundle identity exists):
 ///   dist/DeepTally.app/Contents/MacOS/DeepTally --spike identity
 ///   dist/DeepTally.app/Contents/MacOS/DeepTally --spike keychain-store
 enum Spikes {
@@ -30,7 +30,6 @@ enum Spikes {
     case "login-item-unregister": printJSON(unregisterLoginItem())
     case "notifications": requestNotifications()
     case "render-popover": renderPopover(arguments.dropFirst())
-    case "proxy": runProxySpike(arguments.dropFirst())
     case "simulate-wake": simulateWake()
     default: printJSON(["error": "unknown spike command"])
     }
@@ -43,12 +42,9 @@ enum Spikes {
   /// a human at the screen — and so README and docs screenshots come from the shipping views instead
   /// of a mockup.
   ///
-  ///   --spike render-popover [basePath] [height] [--ledger <path>] [--opencode <path>]
+  ///   --spike render-popover [basePath] [height]
   ///
-  /// Defaults to `dist/popover` and a 420pt-tall body. `--ledger`/`--opencode` point the render at a
-  /// throwaway store and database instead of the real ones, so the gate can render a seeded value
-  /// without writing into the app's own ledger — and can show the fail-soft path with a database that
-  /// does not exist.
+  /// Defaults to `dist/popover` and a 420pt-tall body.
   ///
   /// It runs the real composition root and the real key precedence, so a successful render with
   /// DEEPSEEK_API_KEY unset is also proof that the Keychain import worked.
@@ -73,40 +69,14 @@ enum Spikes {
       height = Double(first) ?? height
       rest = rest.dropFirst()
     }
-    var ledgerPath: String?
-    var openCodePath: String?
-    while let flag = rest.first {
-      rest = rest.dropFirst()
-      switch flag {
-      case "--ledger":
-        ledgerPath = rest.first
-        rest = rest.dropFirst()
-      case "--opencode":
-        openCodePath = rest.first
-        rest = rest.dropFirst()
-      default:
-        break
-      }
-    }
 
-    let environment = AppEnvironment(
-      ledgerURL: ledgerPath.map { URL(fileURLWithPath: $0) } ?? LedgerStore.standardURL,
-      openCodeDatabaseURL: openCodePath.map { URL(fileURLWithPath: $0) }
-        ?? OpenCodeImporter.standardDatabaseURL)
+    let environment = AppEnvironment()
     let model = AppModel(environment: environment)
     model.start()
     let deadline = Date().addingTimeInterval(20)
     // Wait for a settled state: a persisted reading can make balanceState non-nil before the live fetch
     // finishes, which would bake a permanent "Refreshing…" into the screenshot.
     while (model.balanceState == nil || model.isRefreshing) && Date() < deadline {
-      RunLoop.main.run(until: Date().addingTimeInterval(0.2))
-    }
-    // The ledger metrics are half of what this render reports, so wait for the first pass too. The
-    // first pass on a real profile imports the whole local database, which is slower than a poll; the
-    // loop ends as soon as that pass finishes either way. A longer budget than the balance's, because
-    // a full scan of a large opencode database is the expected first run.
-    let usageDeadline = Date().addingTimeInterval(90)
-    while model.localUsage == nil && model.isLocalUsageRefreshing && Date() < usageDeadline {
       RunLoop.main.run(until: Date().addingTimeInterval(0.2))
     }
     let menuBar = model.menuBarPresentation
@@ -126,14 +96,6 @@ enum Spikes {
       "notificationsEnabled": model.settings.notificationsEnabled,
       "alertsAvailable": model.alertAuthorization == .authorized,
       "alertsAuthorization": Self.authorizationName(model.alertAuthorization),
-      // The selected metric and the ledger-backed numbers behind it. Added for the Step 4 gate; the
-      // fields above are unchanged.
-      "menuBarMetric": model.settings.menuBarMetric.rawValue,
-      "metricLabel": model.menuBarLabel,
-      "todaySpendLabel": model.todaySpendText ?? "none",
-      "cacheHitRateLabel": model.cacheHitRateText,
-      "localUsageProblem": model.localUsageProblem ?? "",
-      "ledgerPath": environment.ledgerURL.path,
     ])
 
     for (suffix, scheme) in [("", ColorScheme.light), ("-dark", .dark)] {
@@ -157,7 +119,6 @@ enum Spikes {
       isImportingKey: false,
       importMessage: nil,
       alertsUnavailable: model.alertsUnavailable,
-      proxyCaption: model.proxyCaption,
       onImportFromShell: { _ in },
       onDeleteKey: {}
     )
@@ -168,68 +129,6 @@ enum Spikes {
           .background(Color(white: 0.97))),
       size: NSSize(width: 320, height: 620),
       to: URL(fileURLWithPath: basePath + "-settings.png"))
-    exit(0)
-  }
-
-  // MARK: - The usage proxy
-
-  /// The Step 6.5 spike: the real proxy in the foreground, against the real ledger and the real
-  /// upstream. A spike, not a user feature — the shipping path is the settings toggle, and this is
-  /// what the release gate drives.
-  ///
-  ///   --spike proxy [port] [--ledger PATH]
-  ///
-  /// Defaults to port 8787 and the standard ledger. It prints one JSON line with the port the
-  /// listener actually bound — pass 0 to ask for an ephemeral one — and then runs until it is killed.
-  /// It needs no API key of its own: the client's own `Authorization` header is what travels
-  /// upstream, and the ledger records only counters, model and response id.
-  @MainActor
-  private static func runProxySpike(_ arguments: ArraySlice<String>) -> Never {
-    var port = 8787
-    var ledgerPath = LedgerStore.standardURL.path
-    var rest = arguments
-    if let first = rest.first, !first.hasPrefix("--") {
-      port = Int(first) ?? port
-      rest = rest.dropFirst()
-    }
-    while let flag = rest.first {
-      rest = rest.dropFirst()
-      switch flag {
-      case "--ledger":
-        if let path = rest.first {
-          ledgerPath = path
-          rest = rest.dropFirst()
-        }
-      default:
-        break
-      }
-    }
-
-    let ledgerURL = URL(fileURLWithPath: ledgerPath)
-    let environment = AppEnvironment(ledgerURL: ledgerURL)
-    let ledger = environment.makeLocalUsageLedger()
-    let calendar = environment.calendar
-    let server = environment.makeUsageProxyServer(recording: { usage in
-      // The ledger the app itself writes to, priced the same way: this spike exists to prove the
-      // shipping path rather than a parallel one.
-      _ = await ledger.record(usage, now: Date(), calendar: calendar)
-    })
-    Task {
-      switch await server.start(port: port) {
-      case .listening(let boundPort):
-        printJSON([
-          "command": "proxy",
-          "port": boundPort,
-          "ledger": ledgerURL.path,
-          "upstream": URLSessionProxyUpstream.baseURL.absoluteString,
-        ])
-      case .notListening(let reason):
-        printJSON(["command": "proxy", "error": reason, "ledger": ledgerURL.path])
-        exit(3)
-      }
-    }
-    // The listener is this process's foreground work: it stays up until it is killed.
-    RunLoop.main.run()
     exit(0)
   }
 
@@ -448,8 +347,8 @@ enum Spikes {
       return
     }
     print(line)
-    // Flushed, not merely printed: `--spike proxy` keeps running after its one line, and a caller
-    // reading the port out of a pipe would otherwise wait for a buffer that never fills.
+    // Flushed, not merely printed: a caller reading its one line from a pipe would otherwise wait for
+    // a buffer that never fills.
     fflush(stdout)
   }
 }

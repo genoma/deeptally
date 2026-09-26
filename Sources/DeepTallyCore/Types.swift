@@ -1,24 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-// MARK: - Provenance
-
-/// Where a usage record came from. Billing trust differs per source, so this is stored, not inferred.
-public enum UsageSource: String, Codable, Sendable, CaseIterable {
-  case proxy
-  case opencode
-  case csv
-  case manual
-}
-
-/// Which gateway actually served a request. Only `.deepseek` maps to the account balance.
-public enum Provider: String, Codable, Sendable, CaseIterable {
-  case deepseek
-  case kilo
-  case openrouter
-  case unknown
-}
-
 // MARK: - Balance
 
 /// One currency entry of `GET /user/balance`. Amounts arrive as strings and are kept as `Decimal`.
@@ -160,113 +142,6 @@ public struct ModelInfo: Sendable, Equatable, Codable {
   private enum CodingKeys: String, CodingKey {
     case id
     case ownedBy = "owned_by"
-  }
-}
-
-// MARK: - Token usage
-
-/// Per-response usage as returned by DeepSeek's chat completions.
-/// `promptTokens == cacheHitTokens + cacheMissTokens`.
-public struct TokenUsage: Sendable, Equatable, Codable {
-  public let promptTokens: Int
-  public let completionTokens: Int
-  public let totalTokens: Int
-  public let cacheHitTokens: Int
-  public let cacheMissTokens: Int
-  public let reasoningTokens: Int
-
-  public init(
-    promptTokens: Int,
-    completionTokens: Int,
-    totalTokens: Int? = nil,
-    cacheHitTokens: Int,
-    cacheMissTokens: Int,
-    reasoningTokens: Int = 0
-  ) {
-    self.promptTokens = promptTokens
-    self.completionTokens = completionTokens
-    self.totalTokens = totalTokens ?? (promptTokens + completionTokens)
-    self.cacheHitTokens = cacheHitTokens
-    self.cacheMissTokens = cacheMissTokens
-    self.reasoningTokens = reasoningTokens
-  }
-
-  /// Cache-hit ratio in `0...1`, or `nil` when the request had no prompt tokens to classify.
-  public var cacheHitRatio: Double? {
-    let denominator = cacheHitTokens + cacheMissTokens
-    guard denominator > 0 else { return nil }
-    return Double(cacheHitTokens) / Double(denominator)
-  }
-
-  private enum CodingKeys: String, CodingKey {
-    case promptTokens = "prompt_tokens"
-    case completionTokens = "completion_tokens"
-    case totalTokens = "total_tokens"
-    case cacheHitTokens = "prompt_cache_hit_tokens"
-    case cacheMissTokens = "prompt_cache_miss_tokens"
-    case completionTokensDetails = "completion_tokens_details"
-  }
-
-  private struct CompletionDetails: Sendable, Codable {
-    let reasoningTokens: Int
-
-    private enum CodingKeys: String, CodingKey {
-      case reasoningTokens = "reasoning_tokens"
-    }
-  }
-
-  public init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    promptTokens = try container.decodeIfPresent(Int.self, forKey: .promptTokens) ?? 0
-    completionTokens = try container.decodeIfPresent(Int.self, forKey: .completionTokens) ?? 0
-    cacheHitTokens = try container.decodeIfPresent(Int.self, forKey: .cacheHitTokens) ?? 0
-    cacheMissTokens = try container.decodeIfPresent(Int.self, forKey: .cacheMissTokens) ?? 0
-    totalTokens =
-      try container.decodeIfPresent(Int.self, forKey: .totalTokens)
-      ?? (promptTokens + completionTokens)
-    let details = try container.decodeIfPresent(
-      CompletionDetails.self, forKey: .completionTokensDetails)
-    reasoningTokens = details?.reasoningTokens ?? 0
-  }
-
-  public func encode(to encoder: any Encoder) throws {
-    var container = encoder.container(keyedBy: CodingKeys.self)
-    try container.encode(promptTokens, forKey: .promptTokens)
-    try container.encode(completionTokens, forKey: .completionTokens)
-    try container.encode(totalTokens, forKey: .totalTokens)
-    try container.encode(cacheHitTokens, forKey: .cacheHitTokens)
-    try container.encode(cacheMissTokens, forKey: .cacheMissTokens)
-    try container.encode(
-      CompletionDetails(reasoningTokens: reasoningTokens), forKey: .completionTokensDetails)
-  }
-}
-
-/// A single observed request, ready for the ledger.
-public struct UsageRecord: Sendable, Equatable, Codable {
-  public let timestamp: Date
-  public let source: UsageSource
-  public let provider: Provider
-  public let model: String
-  public let usage: TokenUsage
-  public let costUSD: Decimal
-  public let sessionID: String?
-
-  public init(
-    timestamp: Date,
-    source: UsageSource,
-    provider: Provider,
-    model: String,
-    usage: TokenUsage,
-    costUSD: Decimal,
-    sessionID: String? = nil
-  ) {
-    self.timestamp = timestamp
-    self.source = source
-    self.provider = provider
-    self.model = model
-    self.usage = usage
-    self.costUSD = costUSD
-    self.sessionID = sessionID
   }
 }
 

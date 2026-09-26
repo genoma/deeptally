@@ -13,11 +13,7 @@ protocol AppScheduling: AnyObject {
   func scheduleRefresh(after delay: TimeInterval, _ run: @escaping @MainActor () -> Void)
   /// Runs `tick` every `interval` seconds until ``cancel()``.
   func startTicker(every interval: TimeInterval, _ tick: @escaping @MainActor () -> Void)
-  /// Runs `ledgerTick` every `interval` seconds until ``cancel()``. A second, independent cadence:
-  /// the local-usage import is fixed at fifteen minutes and has nothing to do with the balance poll.
-  func startLedgerTicker(
-    every interval: TimeInterval, _ ledgerTick: @escaping @MainActor () -> Void)
-  /// Cancels the pending refresh and both tickers.
+  /// Cancels the pending refresh and the ticker.
   func cancel()
 }
 
@@ -26,7 +22,6 @@ protocol AppScheduling: AnyObject {
 final class TaskAppScheduler: AppScheduling {
   private var refreshTask: Task<Void, Never>?
   private var tickerTask: Task<Void, Never>?
-  private var ledgerTask: Task<Void, Never>?
 
   func scheduleRefresh(after delay: TimeInterval, _ run: @escaping @MainActor () -> Void) {
     refreshTask?.cancel()
@@ -42,21 +37,13 @@ final class TaskAppScheduler: AppScheduling {
     tickerTask = repeating(every: interval, tick)
   }
 
-  func startLedgerTicker(
-    every interval: TimeInterval, _ ledgerTick: @escaping @MainActor () -> Void
-  ) {
-    ledgerTask?.cancel()
-    ledgerTask = repeating(every: interval, ledgerTick)
-  }
-
   func cancel() {
     refreshTask?.cancel()
     tickerTask?.cancel()
-    ledgerTask?.cancel()
   }
 
-  /// The one ticker loop both cadences use. It does not capture the scheduler: the scheduler owns the
-  /// task, and a finished task would otherwise pin a cancelled one in place.
+  /// The ticker loop. It does not capture the scheduler: the scheduler owns the task, and a finished
+  /// task would otherwise pin a cancelled one in place.
   private func repeating(
     every interval: TimeInterval,
     _ body: @escaping @MainActor () -> Void
