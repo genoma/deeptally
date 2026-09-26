@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# CI: the gate a developer runs locally (`make verify`), plus the checks a human forgets — SPDX
+# headers, shell syntax, and the CLI answering `--version`.
+#
+# `make smoke` is deliberately absent: it launches the menu bar app, and a GUI app has no business
+# running in a headless job.
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+# Least privilege: every step below only reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build, test, lint, bundle and verify the signature
+        run: make verify
+
+      - name: Every Sources, Tests and Scripts file carries an SPDX header
+        run: |
+          set -euo pipefail
+          files="$(find Sources Tests Scripts -type f \( -name '*.swift' -o -name '*.sh' \) | LC_ALL=C sort)"
+          if [ -z "$files" ]; then
+            echo "::error::no .swift or .sh files found under Sources, Tests or Scripts" >&2
+            exit 1
+          fi
+          missing=0
+          while IFS= read -r file; do
+            if ! grep -q 'SPDX-License-Identifier' "$file"; then
+              echo "::error file=$file::missing an SPDX-License-Identifier header"
+              missing=$((missing + 1))
+            fi
+          done <<< "$files"
+          if [ "$missing" -ne 0 ]; then
+            echo "SPDX check failed: $missing file(s) without the header" >&2
+            exit 1
+          fi
+          echo "SPDX check passed: $(printf '%s\n' "$files" | wc -l | tr -d ' ') files"
+
+      - name: Every Scripts/*.sh parses under the system bash
+        run: |
+          set -euo pipefail
+          found=0
+          # /bin/bash, not whatever Homebrew put first on PATH: /bin/bash is still 3.2, and that is
+          # the interpreter these scripts must survive on a stock macOS (AGENTS.md §3, rule 1).
+          for script in Scripts/*.sh; do
+            [ -f "$script" ] || continue
+            found=1
+            /bin/bash -n "$script"
+            echo "bash -n ok: $script"
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no Scripts/*.sh files found" >&2
+            exit 1
+          fi
+
+      - name: The CLI answers --version
+        run: |
+          set -euo pipefail
+          # The same configuration `make verify` built above, so this is incremental.
+          swift build -c release --arch arm64 --product deeptally
+          # --show-bin-path prints where the product landed; the build log goes to stderr.
+          bin_dir="$(swift build -c release --arch arm64 --show-bin-path | tail -1)"
+          output="$("$bin_dir/deeptally" --version)"
+          echo "deeptally --version -> $output"
+          case "$output" in
+            "deeptally "*) echo "CLI --version ok" ;;
+            *)
+              echo "::error::unexpected deeptally --version output: $output" >&2
+              exit 1
+              ;;
+          esac
