@@ -104,7 +104,9 @@ public struct UpsertOutcome: Sendable, Equatable {
 /// their last computed values, which is exactly what lets ``pruneRawRequests(olderThanDays:now:)``
 /// drop old raw rows without losing the totals they contributed — so a prune always removes whole UTC
 /// days and never leaves a day half-aggregated. The trade-off is that raw-row range queries cannot
-/// see past the prune horizon; the rollups can.
+/// see past the prune horizon; the rollups can — ``usageWindow(since:until:provider:)`` is the reader
+/// that uses them, answering a day from `request` while its rows are there and from `daily` once they
+/// are not.
 ///
 /// ## Concurrency
 /// Deliberately **not** `Sendable`: the single `sqlite3` connection inside must be touched from one
@@ -893,7 +895,9 @@ public final class LedgerStore {
   ///
   /// The range is half-open and compared against `request.ts` at second resolution, so a caller
   /// builds a local day as `[start of that day, start of the next day)`. This reads `request`, not
-  /// `daily`, because a local-time boundary can fall inside a UTC day.
+  /// `daily`, because a local-time boundary can fall inside a UTC day. A caller that needs a pruned
+  /// range — read as the whole UTC days it was pruned in — wants
+  /// ``usageWindow(since:until:provider:)`` instead.
   public func summary(since: Date, until: Date, provider: Provider? = nil) throws -> LedgerSummary {
     var sql = """
       SELECT provider, model, SUM(input), SUM(output), SUM(reasoning), SUM(cache_read),
@@ -934,6 +938,295 @@ public final class LedgerStore {
         ))
     }
     return LedgerSummary(models: totals)
+  }
+
+  // MARK: - Day windows
+
+  /// Reads `since ..< until` as the UTC days it touches, answering each day from `request` while that
+  /// day's raw rows are still there and from `daily` once ``pruneRawRequests(olderThanDays:now:)`` has
+  /// taken them — which is what keeps a pruned range visible in a long-range report.
+  ///
+  /// ## Which store answers for a day
+  /// A UTC day with at least one `request` row **anywhere** in it is intact: a prune deletes whole UTC
+  /// days and never leaves one half-aggregated, so the day is answered from `request`, aggregating the
+  /// rows that fall inside the range. Otherwise `daily` is the only store that could answer for the day,
+  /// and it answers only when the range covers the day whole. A day the range only partly covers is never
+  /// read from `daily` — a whole-day aggregate used for part of a day would over-count — so when `daily`
+  /// holds rows for it the day is named in ``LedgerUsageWindow/unavailableDays`` and contributes nothing.
+  /// A day that holds nothing in either store contributes nothing and is *not* unavailable: there is no
+  /// usage recorded for it, so nothing is missing.
+  ///
+  /// Each day's summary carries per-provider, per-model ``LedgerModelTotals`` in the order
+  /// ``summary(since:until:provider:)`` puts them, and ``LedgerUsageWindow/summary`` is the days'
+  /// counters summed on those same keys. So a window with nothing pruned in it equals a raw summary
+  /// over the same range exactly, and with days pruned it differs only by the days `request` no longer
+  /// has.
+  ///
+  /// ## The provider filter
+  /// `provider` narrows the rows both stores contribute — the raw aggregate and the `daily` rows. It
+  /// deliberately does **not** narrow the test that decides which store answers a day: that test asks
+  /// whether the day was pruned, and a prune removes the whole day whatever providers were in it, so a
+  /// filtered test could call an intact day unavailable.
+  ///
+  /// ## What a rollup day cannot see
+  /// `daily` has no `cache_write` column, so a day read from it reports `cacheWriteTokens == 0` and a
+  /// prompt total of `input + cache_read`. That is exact for every record this store writes, because
+  /// ``storedCounters(for:)`` folds cache writes into `input` (`TokenUsage` does not separate them). A
+  /// row written **outside this type** with a nonzero `cache_write` — hand-written SQL — would make the
+  /// rollup path report fewer prompt tokens, and a lower cache-hit ratio, than the raw path for the
+  /// same row. Money, request counts and every other counter are exact either way.
+  ///
+  /// ## Day counts
+  /// ``LedgerUsageWindow/rawDayCount`` plus ``LedgerUsageWindow/rollupDayCount`` plus
+  /// ``LedgerUsageWindow/unavailableDays`` account for every UTC day the range touches, except a day that
+  /// holds nothing in either store — with a `provider`, nothing for that provider. Those are counted
+  /// nowhere, deliberately. Days are walked oldest first, so ``LedgerUsageWindow/days`` and
+  /// ``LedgerUsageWindow/unavailableDays`` are in date order, and the walk is by 86 400-second UTC days —
+  /// a UTC day has no DST and no leap second in this store's arithmetic.
+  public func usageWindow(
+    since: Date, until: Date, provider: Provider? = nil
+  ) throws -> LedgerUsageWindow {
+    let rangeStart = Self.epochSeconds(since)
+    let rangeEnd = Self.epochSeconds(until)
+    guard rangeStart < rangeEnd else {
+      return LedgerUsageWindow(
+        days: [], summary: LedgerSummary(models: []), rawDayCount: 0, rollupDayCount: 0,
+        unavailableDays: [])
+    }
+
+    let dayExists = try prepare(Self.rawDayExistsSQL, context: "usage window day")
+    defer { _ = sqlite3_finalize(dayExists) }
+    let rawRows = try prepare(
+      Self.rawDayTotalsSQL(provider: provider), context: "usage window raw rows")
+    defer { _ = sqlite3_finalize(rawRows) }
+    let dailyRows = try prepare(
+      Self.dailyDayTotalsSQL(provider: provider), context: "usage window daily rows")
+    defer { _ = sqlite3_finalize(dailyRows) }
+
+    let dateFormat = Self.utcDateFormatter()
+    var days: [LedgerDayUsage] = []
+    var merged: [ModelKey: ModelGroup] = [:]
+    var unavailableDays: [String] = []
+    var rawDayCount = 0
+    var rollupDayCount = 0
+
+    // `utcDayStart(since)` floors to the UTC day containing `since`, which is the first day the range
+    // touches; every later day starts 86 400 seconds after the one before it.
+    var dayStart = Self.utcDayStart(since)
+    while dayStart < rangeEnd {
+      let dayEnd = dayStart + 86_400
+      let date = dateFormat.string(from: Date(timeIntervalSince1970: TimeInterval(dayStart)))
+
+      if try rawDayHasRows(dayExists, dayStart: dayStart, dayEnd: dayEnd) {
+        let groups = try rawDayGroups(
+          rawRows, since: max(dayStart, rangeStart), until: min(dayEnd, rangeEnd),
+          provider: provider)
+        days.append(
+          LedgerDayUsage(
+            date: date, dayStart: Date(timeIntervalSince1970: TimeInterval(dayStart)),
+            source: .rawRows, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
+        Self.merge(groups, into: &merged)
+        rawDayCount += 1
+      } else {
+        // No raw rows: `daily` is the only store that could answer for this day, and it answers only
+        // when the range covers the day whole — a whole-day aggregate used for part of a day would
+        // over-count. A day `daily` holds nothing for, whole or partial, contributes nothing and is not
+        // unavailable: there is no usage to count, so nothing is missing from it.
+        let groups = try dailyDayGroups(dailyRows, date: date, provider: provider)
+        if !groups.isEmpty, dayStart >= rangeStart, dayEnd <= rangeEnd {
+          days.append(
+            LedgerDayUsage(
+              date: date, dayStart: Date(timeIntervalSince1970: TimeInterval(dayStart)),
+              source: .rollup, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
+          Self.merge(groups, into: &merged)
+          rollupDayCount += 1
+        } else if !groups.isEmpty {
+          unavailableDays.append(date)
+        }
+      }
+      dayStart = dayEnd
+    }
+
+    let summary = LedgerSummary(
+      models: merged.values
+        .sorted { ($0.providerText, $0.model) < ($1.providerText, $1.model) }
+        .map(Self.modelTotals))
+    return LedgerUsageWindow(
+      days: days, summary: summary, rawDayCount: rawDayCount, rollupDayCount: rollupDayCount,
+      unavailableDays: unavailableDays)
+  }
+
+  /// The merge key for a window's running totals. The provider is the **stored text**, not the
+  /// ``Provider`` it maps to: ``summary(since:until:provider:)`` orders by that text, and two different
+  /// stored ids this build does not know both map to `.unknown` — merging on the mapped value would
+  /// collapse them into one row and reorder the others.
+  private struct ModelKey: Hashable {
+    let provider: String
+    let model: String
+  }
+
+  /// One `(provider, model)` aggregate, as a day's SQL returns it.
+  private struct ModelGroup {
+    let providerText: String
+    let model: String
+    var input: Int64 = 0
+    var output: Int64 = 0
+    var reasoning: Int64 = 0
+    var cacheRead: Int64 = 0
+    var cacheWrite: Int64 = 0
+    var spendMicroUSD: Int64 = 0
+    var requestCount: Int64 = 0
+
+    /// Adds `other`'s counters. Only ever called with a group carrying the same key, which is what
+    /// makes the sum a `(provider, model)` total rather than a mixture.
+    mutating func add(_ other: ModelGroup) {
+      input += other.input
+      output += other.output
+      reasoning += other.reasoning
+      cacheRead += other.cacheRead
+      cacheWrite += other.cacheWrite
+      spendMicroUSD += other.spendMicroUSD
+      requestCount += other.requestCount
+    }
+  }
+
+  /// Adds one day's groups to the window's running totals, summing the money as micro-USD integers so
+  /// nothing rounds before the `Decimal` boundary.
+  private static func merge(_ groups: [ModelGroup], into merged: inout [ModelKey: ModelGroup]) {
+    for group in groups {
+      let key = ModelKey(provider: group.providerText, model: group.model)
+      var running = merged[key] ?? ModelGroup(providerText: group.providerText, model: group.model)
+      running.add(group)
+      merged[key] = running
+    }
+  }
+
+  /// One group as the public summary type: the same mapping ``summary(since:until:provider:)`` applies,
+  /// micro-USD to `Decimal` and an unreadable stored provider to `.unknown`.
+  private static func modelTotals(_ group: ModelGroup) -> LedgerModelTotals {
+    LedgerModelTotals(
+      provider: Provider(rawValue: group.providerText) ?? .unknown,
+      model: group.model,
+      spendUSD: MicroUSD.decimal(group.spendMicroUSD),
+      inputTokens: Int(group.input),
+      outputTokens: Int(group.output),
+      reasoningTokens: Int(group.reasoning),
+      cacheReadTokens: Int(group.cacheRead),
+      cacheWriteTokens: Int(group.cacheWrite),
+      requestCount: Int(group.requestCount))
+  }
+
+  /// Whether `request` holds any row in the whole UTC day `dayStart ..< dayStart + 86 400`. The
+  /// provider filter is deliberately not applied here: this is the "was this day pruned?" test, and a
+  /// prune removes whole days whatever was in them.
+  private func rawDayHasRows(
+    _ statement: OpaquePointer, dayStart: Int64, dayEnd: Int64
+  ) throws -> Bool {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, dayStart)
+    try bind(statement, 2, dayEnd)
+    let step = sqlite3_step(statement)
+    guard step == SQLITE_ROW else {
+      throw Self.error(step, context: "usage window day", message: Self.errorMessage(database))
+    }
+    return sqlite3_column_int64(statement, 0) != 0
+  }
+
+  /// The aggregate over the part of one raw day that lies inside the range.
+  private func rawDayGroups(
+    _ statement: OpaquePointer, since: Int64, until: Int64, provider: Provider?
+  ) throws -> [ModelGroup] {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, since)
+    try bind(statement, 2, until)
+    if let provider { try bind(statement, 3, provider.rawValue) }
+    return try modelGroups(statement, context: "usage window raw rows")
+  }
+
+  /// The rows `daily` holds for one UTC date, `date` being the `date(ts, 'unixepoch')` spelling of the
+  /// day. An empty result means the day is not in the rollup at all.
+  private func dailyDayGroups(
+    _ statement: OpaquePointer, date: String, provider: Provider?
+  ) throws -> [ModelGroup] {
+    _ = sqlite3_reset(statement)
+    _ = sqlite3_clear_bindings(statement)
+    try bind(statement, 1, date)
+    if let provider { try bind(statement, 2, provider.rawValue) }
+    return try modelGroups(statement, context: "usage window daily rows")
+  }
+
+  /// Decodes every row a day query returns. Both day queries select the same nine columns in the same
+  /// order, so one decoder serves them; the rollup's `cache_write` is a literal 0 there, because the
+  /// column does not exist in `daily`.
+  private func modelGroups(_ statement: OpaquePointer, context: String) throws -> [ModelGroup] {
+    var groups: [ModelGroup] = []
+    while true {
+      let step = sqlite3_step(statement)
+      if step == SQLITE_DONE { break }
+      guard step == SQLITE_ROW else {
+        throw Self.error(step, context: context, message: Self.errorMessage(database))
+      }
+      groups.append(
+        ModelGroup(
+          providerText: text(statement, 0) ?? "",
+          model: text(statement, 1) ?? "",
+          input: sqlite3_column_int64(statement, 2),
+          output: sqlite3_column_int64(statement, 3),
+          reasoning: sqlite3_column_int64(statement, 4),
+          cacheRead: sqlite3_column_int64(statement, 5),
+          cacheWrite: sqlite3_column_int64(statement, 6),
+          spendMicroUSD: sqlite3_column_int64(statement, 7),
+          requestCount: sqlite3_column_int64(statement, 8)))
+    }
+    return groups
+  }
+
+  /// Whether the whole day holds a raw row. One row is enough: the answer is a yes/no about the day,
+  /// not a count.
+  private static let rawDayExistsSQL = """
+    SELECT EXISTS(SELECT 1 FROM request WHERE ts >= ?1 AND ts < ?2)
+    """
+
+  /// One day's raw rows, aggregated over the intersection of that day with the range (`?1`, `?2`), so a
+  /// day the range only partly covers contributes only its inside part.
+  private static func rawDayTotalsSQL(provider: Provider?) -> String {
+    var sql = """
+      SELECT provider, model, SUM(input), SUM(output), SUM(reasoning), SUM(cache_read),
+             SUM(cache_write), SUM(cost_micro_usd), COUNT(*)
+        FROM request
+       WHERE ts >= ?1 AND ts < ?2
+      """
+    if provider != nil { sql += "   AND provider = ?3\n" }
+    sql += "   GROUP BY provider, model\n   ORDER BY provider, model"
+    return sql
+  }
+
+  /// One day's rollup rows. `daily` has no `cache_write` column, so the seventh column is a literal 0;
+  /// see ``usageWindow(since:until:provider:)`` for why that is exact for every row this store writes.
+  private static func dailyDayTotalsSQL(provider: Provider?) -> String {
+    var sql = """
+      SELECT provider, model, input, output, reasoning, cache_read, 0, cost_micro_usd,
+             request_count
+        FROM daily
+       WHERE date = ?1
+      """
+    if provider != nil { sql += "   AND provider = ?2\n" }
+    sql += "   ORDER BY provider, model"
+    return sql
+  }
+
+  /// The `YYYY-MM-DD` spelling `daily.date` uses, computed in UTC. A fresh formatter per call, for the
+  /// reason ``RateNowPresenter`` makes one: `DateFormatter` is not `Sendable` and this type keeps no
+  /// such state.
+  private static func utcDateFormatter() -> DateFormatter {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = TimeZone.gmt
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter
   }
 
   // MARK: - Pruning

@@ -40,8 +40,9 @@ timestamp** — importing an old row today does not restate it at today's prices
 watermark), so a second run adds nothing. `deeptally import --full` rescans everything instead, which is the
 repair pass for a row whose timestamp arrived behind the watermark.
 - **"Today" means your local day**, not UTC. Every window is built from your calendar — the `usage` windows
-and the two ledger-backed metrics alike. The ledger also keeps UTC-keyed rollups, but that is a storage
-detail and no local-day figure is read out of them ([`ARCHITECTURE.md`](ARCHITECTURE.md)).
+and the two ledger-backed metrics alike. The ledger also keeps UTC-keyed rollups, which answer for a day
+whose raw rows were pruned; such a day enters a report as the whole UTC day it is, and `usage` notes that
+and names any day it could not answer for ([`ARCHITECTURE.md`](ARCHITECTURE.md)).
 - **The spend is an estimate.** The token counters are real, but the price applied to them comes from the
 versioned price table, and model line-ups and prices changed three times in 2026. DeepSeek's own billing is
 the only authoritative figure, and there is no API for it.
@@ -124,7 +125,7 @@ deeptally rate                           # the peak/off-peak window in force, wi
 deeptally usage [--json] [--days N]      # today, last 7 and last 30 days, then per model
 deeptally import [--full]                # import local opencode usage into the ledger
 deeptally ledger export <path.csv>       # write every raw ledger row as CSV
-deeptally ledger prune --days N          # delete raw rows older than N days (rollups kept)
+deeptally ledger prune --days N          # delete raw rows older than N days; their UTC days stay in usage
 deeptally ledger reprice [--json]        # recompute stored costs with the current price table
 deeptally key status                     # which store supplies the key, and any Keychain problem
 deeptally key import [--shell zsh|bash]  # import from the login shell into the Keychain (default: zsh)
@@ -202,14 +203,27 @@ definitions, added rather than re-derived). **Cache hit** is cache reads ÷ prom
 window held no prompt tokens — a ratio with no denominator is unknown, not 0%.
 - **Spend** is in the price table's currency (USD with the shipped table), not the account's, and is never
 converted. On screen it gets two decimals, plus up to two more when the amount needs them.
+- **A day whose raw rows were pruned is reported as a whole UTC day.** Its totals come from the `daily`
+rollups instead of from the rows, so it is exact but not splittable: a window that only covers part of such
+a day leaves it out and names the date, and the report says which days came from the rollups:
+
+  ```text
+  note: 1 day in these windows comes from the daily rollup table, which is keyed by whole UTC days.
+  2026-09-19 is only partly inside these windows, so its partial totals are not included.
+  ```
+
+  Those lines appear only when they explain something: an unpruned ledger reads exactly as it always did.
 - The header names the time zone the local days were computed in, and the last line names the ledger file and
 its raw row count.
 
 With `--json` the same numbers come as one document with stable key names: `schema`, `generated_at`,
-`timezone`, `currency`, `days`, `selected`, `windows[]` (`key`, `from`, `until`, plus the numbers) and
-`models[]`. Money is a decimal **string** (`"spend": "0.000577"`) so no float ever touches it, and
-`cache_hit_pct` is `null` — not 0 — when there is no denominator. Boundaries are ISO-8601 in the report's own
-time zone, offset included. With no rows at all, the report still answers:
+`timezone`, `currency`, `days`, `selected`, `windows[]` (`key`, `from`, `until`, `rollup_days`,
+`unavailable_days`, plus the numbers) and `models[]`. `rollup_days` counts the days of that window that came
+from the rollups, and `unavailable_days` lists the `YYYY-MM-DD` UTC dates it left out — the plain report says
+the same thing in its footnote. Money is a decimal **string**
+(`"spend": "0.000577"`) so no float ever touches it, and `cache_hit_pct` is `null` — not 0 — when there is
+no denominator. Boundaries are ISO-8601 in the report's own time zone, offset included. With no rows at all,
+the report still answers:
 
 ```text
 $ deeptally usage
@@ -263,7 +277,9 @@ Imported 1 new row of 5 offered (full resync).
 $ deeptally ledger export /tmp/doc-evidence/ledger.csv
 Exported 5 raw rows to /tmp/doc-evidence/ledger.csv.
 $ deeptally ledger prune --days 30
-Pruned 1 raw row older than 30 days; the daily rollups were kept.
+Pruned 1 raw row older than 30 days.
+  `deeptally usage` still reports those days' aggregate, read from the daily rollups as whole UTC days;
+  `ledger reprice` can no longer revise pruned rows.
 ```
 
 `export` writes every raw row, oldest first, as CSV with the columns
@@ -271,10 +287,14 @@ Pruned 1 raw row older than 30 days; the daily rollups were kept.
 an inspection and interchange format, never the primary store; the file round-trips back into a ledger
 (importing it is core functionality, not yet a CLI command).
 
-`prune --days N` deletes **raw rows** older than N days and keeps the `daily` rollups, so the totals those
-days contributed survive; the cutoff is floored to a UTC day so a day is never half-deleted. Nothing prunes
-by itself — the horizon is yours to choose, and `--days` is required. `deeptally ledger prune --days`
-without a value is a usage error (exit `1`), not a default horizon.
+`prune --days N` deletes **raw rows** older than N days and keeps the `daily` rollups; the cutoff is floored
+to a UTC day, so a day is never half-deleted. `deeptally usage` still reports the pruned days out of those
+rollups, with the two limits that follow from a rollup being one whole UTC day: a window that only covers
+part of a pruned day leaves it out and names the date, and the day can no longer be re-sliced at a
+local-time boundary. The other cost of a prune is repair: `ledger reprice` reads raw rows, so it can no
+longer revise a pruned day. Nothing prunes by itself — the horizon is yours to choose, and `--days` is
+required. `deeptally ledger prune --days` without a value is a usage error (exit `1`), not a default
+horizon.
 
 `reprice` is the repair path for stored costs; see the next section.
 

@@ -125,6 +125,33 @@ struct UsageReportTests {
     #expect((root["models"] as? [Any])?.isEmpty == true)
   }
 
+  @Test("every window carries its rollup day count and the dates the rollup cannot slice")
+  func rollupKeys() throws {
+    let summary = LedgerSummary(models: [
+      model(spend: "0.421300", input: 200, output: 50, cacheRead: 800, requests: 3)
+    ])
+    let report = report(
+      windows: summary, selected: summary, rowCount: 3, rollupDays: 2,
+      unavailableDays: ["2026-08-01"])
+    let root = try jsonObject(report.jsonText())
+
+    let windows = try #require(root["windows"] as? [[String: Any]])
+    #expect(windows.allSatisfy { $0["rollup_days"] as? Int == 2 })
+    #expect(windows.allSatisfy { $0["unavailable_days"] as? [String] == ["2026-08-01"] })
+    #expect((root["selected"] as? [String: Any])?["rollup_days"] as? Int == 2)
+    #expect(
+      (root["selected"] as? [String: Any])?["unavailable_days"] as? [String] == ["2026-08-01"])
+    // The key style is the document's: every multiword key is snake_case.
+    #expect(windows.allSatisfy { $0["rollupDays"] == nil && $0["unavailableDays"] == nil })
+    // Every existing key keeps its name and its value.
+    #expect(windows[0]["key"] as? String == "today")
+    #expect(windows[0]["from"] as? String == "2025-08-24T00:00:00+02:00")
+    #expect(windows[0]["until"] as? String == "2025-08-25T00:00:00+02:00")
+    #expect(windows[0]["spend"] as? String == "0.421300")
+    #expect(windows[0]["requests"] as? Int == 3)
+    #expect(windows[0]["cache_hit_pct"] as? Double == 80)
+  }
+
   // MARK: - Human output
 
   @Test("the human report prints spend, requests, tokens and the cache-hit rate")
@@ -170,18 +197,78 @@ struct UsageReportTests {
     #expect(!text.contains("0.0%"))
   }
 
+  @Test("a report with no rollup days and nothing unavailable reads exactly as it did")
+  func noRollupNotes() throws {
+    let summary = LedgerSummary(models: [
+      model(spend: "0.421300", input: 200, output: 50, cacheRead: 800, requests: 3)
+    ])
+    let text = report(windows: summary, selected: summary, rowCount: 3).humanText()
+
+    #expect(!text.contains("daily rollup table"))
+    #expect(!text.contains("partly inside"))
+  }
+
+  @Test("a rollup day gets one calm note, and a partial day is named, with its totals left out")
+  func rollupNotes() throws {
+    let summary = LedgerSummary(models: [
+      model(spend: "0.421300", input: 200, output: 50, cacheRead: 800, requests: 3)
+    ])
+    let text = report(
+      windows: summary, selected: summary, rowCount: 3, rollupDays: 2,
+      unavailableDays: ["2026-08-01"]
+    ).humanText()
+
+    #expect(
+      text.contains(
+        "note: 2 days in these windows come from the daily rollup table, which is keyed by whole UTC days."
+      ))
+    #expect(
+      text.contains(
+        "2026-08-01 is only partly inside these windows, so its partial totals are not included."))
+    // The tables are unchanged: the note is a footnote, not a new column.
+    #expect(text.contains("per model, last 30 days:"))
+    #expect(text.contains("ledger: /tmp/ledger.sqlite — 3 raw rows"))
+  }
+
+  @Test("several rolled-up days, and several partial dates, read as sentences")
+  func rollupNotePlural() throws {
+    let empty = LedgerSummary(models: [])
+    let text = report(
+      windows: empty, selected: empty, rowCount: 0, rollupDays: 1,
+      unavailableDays: ["2026-07-31", "2026-08-01"]
+    ).humanText()
+
+    #expect(
+      text.contains(
+        "note: 1 day in these windows comes from the daily rollup table, which is keyed by whole UTC days."
+      ))
+    #expect(
+      text.contains(
+        "2026-07-31 and 2026-08-01 are only partly inside these windows, so their partial totals are not included."
+      ))
+  }
+
   // MARK: - Fixtures
 
   private func report(
-    windows: LedgerSummary, selected: LedgerSummary, rowCount: Int
+    windows: LedgerSummary, selected: LedgerSummary, rowCount: Int, rollupDays: Int = 0,
+    unavailableDays: [String] = []
   ) -> UsageReport {
     UsageReport(
       windows: [
-        window(key: "today", label: "today", summary: windows),
-        window(key: "last_7_days", label: "last 7 days", summary: windows),
-        window(key: "last_30_days", label: "last 30 days", summary: windows),
+        window(
+          key: "today", label: "today", summary: windows, rollupDays: rollupDays,
+          unavailableDays: unavailableDays),
+        window(
+          key: "last_7_days", label: "last 7 days", summary: windows, rollupDays: rollupDays,
+          unavailableDays: unavailableDays),
+        window(
+          key: "last_30_days", label: "last 30 days", summary: windows, rollupDays: rollupDays,
+          unavailableDays: unavailableDays),
       ],
-      selected: window(key: "last_30_days", label: "last 30 days", summary: selected),
+      selected: window(
+        key: "last_30_days", label: "last 30 days", summary: selected, rollupDays: rollupDays,
+        unavailableDays: unavailableDays),
       days: 30,
       generatedAt: fixtureInstant,
       timeZone: fixtureTimeZone,
@@ -191,14 +278,17 @@ struct UsageReportTests {
   }
 
   private func window(
-    key: String, label: String, summary: LedgerSummary
+    key: String, label: String, summary: LedgerSummary, rollupDays: Int = 0,
+    unavailableDays: [String] = []
   ) -> UsageReport.Window {
     UsageReport.Window(
       key: key,
       label: label,
       start: fixtureDayStart,
       end: fixtureDayStart.addingTimeInterval(86_400),
-      summary: summary)
+      summary: summary,
+      rollupDays: rollupDays,
+      unavailableDays: unavailableDays)
   }
 
   private func model(
