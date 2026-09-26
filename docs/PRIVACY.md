@@ -63,7 +63,8 @@ SHA-256 hash of the source row's identity (`source`, id, `session_id`), not its 
 | Last balance reading | Same plist, key `io.github.genoma.deeptally.last-reading` | The last successful `/user/balance` answer — amounts, currency, availability flag — plus the instant it was fetched. It exists so a relaunch can show the amount immediately with a truthful "as of" age instead of an empty panel. |
 | Last low-balance alert | Same plist, key `io.github.genoma.deeptally.last-notified` | A timestamp, written only after macOS accepted the alert, so the cooldown survives a relaunch — while a denied or failed post is retried instead of being recorded as delivered. |
 | API key | One Keychain item: service `io.github.genoma.deeptally`, account `api-key` | Generic password, accessible while the login keychain is unlocked. Never in a file, a preference or a log. |
-| Login item | Registered through `SMAppService` (system-managed) | Removed again by the uninstaller (Step 6), or by turning **Launch at login** off. |
+| Login item | Registered through `SMAppService` (system-managed) | Removed by the uninstaller, or by turning **Launch at login** off. |
+| Saved window state | `~/Library/Saved Application State/io.github.genoma.deeptally.savedState` | Written by macOS, not by DeepTally: AppKit's window restoration, which remembers window placement. DeepTally has one popover and no documents, so this folder often never exists; it holds no usage data. Removed by the uninstaller when it does. |
 | Launch diagnostics | `~/Library/Application Support/DeepTally/launch.log` (capped at 200 lines) and `last-launch.json` | Step 2 spike output only: bundle path, App Translocation, quarantine flag, and whether `DEEPSEEK_API_KEY` was visible in the environment — a boolean, never the key's value. **The shipped app never writes these files**: they exist only while the marker `~/Library/Application Support/DeepTally/spike-enabled` does ([`SPIKES.md`](SPIKES.md)). |
 
 Never stored, anywhere: prompt or completion content, request or response bodies, message text from the
@@ -99,22 +100,34 @@ also not in the export; there is nothing to redact. Treat the file as you would 
 
 **Delete everything.**
 
-1. Turn off **Launch at login** in the popover (or remove DeepTally in *System Settings → General → Login
-   Items*), then **Quit** DeepTally from the popover footer.
-2. Planned in Step 6: *Uninstall DeepTally…* in the app — unregisters the login item, moves the app to the
-   Trash, purges app support, preferences and caches, deletes the Keychain item, and offers a last ledger
-   export ([`PLAN.md`](PLAN.md) Step 6).
-3. Until that lands, remove it by hand:
+1. Open the popover and click **Uninstall DeepTally…** (footer, next to **Quit**). It asks first, and the
+   alert lists what it will remove. If you want a copy of the ledger, choose **Export CSV First…**: the file
+   is written where you choose, and the removal continues only after the write.
+2. That removes exactly seven things: the login item; the Keychain item (service
+   `io.github.genoma.deeptally`, account `api-key`); `~/Library/Application Support/DeepTally` (the ledger
+   with its `-wal`/`-shm` side files, and any Step 2 spike logs); the preferences domain
+   `io.github.genoma.deeptally`; `~/Library/Caches/io.github.genoma.deeptally`;
+   `~/Library/Saved Application State/io.github.genoma.deeptally.savedState` when it exists; and the app
+   bundle itself, which is **moved to the Trash** so it stays recoverable until you empty it. Nothing
+   outside that list is touched, and the run reports each item line by line.
+3. `Scripts/uninstall.sh` — and `DeepTally --uninstall` directly, the same binary headless — does exactly
+   the same thing. `--print-only` prints the plan and changes nothing, `--keep-data` keeps the ledger and
+   the Step 2 logs, `--keep-keychain` keeps the key. See
+   [`USAGE.md`](USAGE.md#uninstalling) for the flags and the exit codes.
+
+The same by hand, if you would rather not run either:
 
 ```sh
 rm -rf "$HOME/Library/Application Support/DeepTally"   # the ledger and any Step 2 spike logs
 defaults delete io.github.genoma.deeptally              # all three keys above
 rm -rf "$HOME/Library/Caches/io.github.genoma.deeptally"
+rm -rf "$HOME/Library/Saved Application State/io.github.genoma.deeptally.savedState"
 ```
 
 Then open **Keychain Access**, search for `DeepTally`, and delete the item (service
-`io.github.genoma.deeptally`, account `api-key`) — `deeptally key delete` does the same thing. That is the
-last piece; nothing is stored anywhere else.
+`io.github.genoma.deeptally`, account `api-key`) — `deeptally key delete` does the same thing — and turn
+**Launch at login** off (or remove DeepTally in *System Settings → General → Login Items*) before deleting
+the app. That is the last piece; nothing is stored anywhere else.
 
 ## No telemetry, ever
 

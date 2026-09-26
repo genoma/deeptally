@@ -504,8 +504,9 @@ below the popover's fold (scroll the popover to reach it), and it is all in the 
 
 ### 8. Footer
 
-One compact line: the version from the bundle (`0.1.0` for a local `make bundle`, `dev` for a bare binary),
-*"local-only"*, a **Quit** button, and the key-store line described above.
+Two compact lines. The first is the version from the bundle (`0.1.0` for a local `make bundle`, `dev` for a
+bare binary), *"local-only"* and a **Quit** button. The second is the key-store line described above and
+**Uninstall DeepTally…**, described in [Uninstalling](#uninstalling) below.
 
 ---
 
@@ -537,8 +538,61 @@ To stop it:
 If the app is running but its status item is hidden behind macOS 27's menu-bar controls, `make kill` is the
 reliable way out.
 
-There is no one-step uninstaller yet: quitting, turning off **Launch at login**, and the deletion steps in
-[`PRIVACY.md`](PRIVACY.md) are manual until Step 6 lands the in-app uninstaller.
+There is no other step: to remove DeepTally as well, use the uninstaller below.
+
+---
+
+## Uninstalling
+
+**Uninstall DeepTally…** sits in the popover footer, next to **Quit**. It asks first, and the alert lists
+exactly what is about to go:
+
+1. the **login item** (Launch at login), so nothing tries to start DeepTally again;
+2. the **API key** — the Keychain item behind *API key: Keychain* in the footer;
+3. `~/Library/Application Support/DeepTally` — the ledger with its `-wal`/`-shm` side files, and any
+   Step 2 spike logs;
+4. the preferences domain `io.github.genoma.deeptally` (the settings and the last balance reading);
+5. `~/Library/Caches/io.github.genoma.deeptally`;
+6. `~/Library/Saved Application State/io.github.genoma.deeptally.savedState`, if macOS wrote one;
+7. **the app itself**, moved to the Trash — the last step, and the reversible one: *Put Back* in the Finder
+   is enough to change your mind.
+
+Nothing outside that list is touched. The run prints one line per item and a summary, and, when everything
+was removed, quits DeepTally (the bundle is in the Trash by then).
+
+**Nothing is kept** — not the ledger, not the key, not the settings. The ledger is the one file that cannot
+be recreated, so the alert offers **Export CSV First…**: it opens the same save panel as the popover's
+export, writes the file where you choose, and only then continues with the removal. Cancelling the save
+panel — or a failed write — cancels the uninstall, because continuing would delete the very file you asked
+to keep. Nothing is removed while a CSV transfer is running, either: the button is disabled until an export
+or import finishes.
+
+A translocated copy refuses the move: macOS runs a quarantined app from a random read-only directory, so
+there is no `DeepTally.app` to move. The data is purged anyway, the report says the bundle was refused, and
+`/Applications/DeepTally.app` has to go to the Trash by hand.
+
+### The same uninstaller from a shell
+
+`Scripts/uninstall.sh` drives the app binary instead of the button, and the flag is public:
+
+```sh
+"/Applications/DeepTally.app/Contents/MacOS/DeepTally" --uninstall
+```
+
+| Flag | What it does |
+|---|---|
+| `--yes` | The caller has already asked the user: this command never prompts |
+| `--print-only` | Print the plan and change nothing (always exits 0) |
+| `--home PATH` | Treat `PATH` as the home directory (tests and the release gate) |
+| `--keep-data` | Keep the ledger and the Step 2 logs, remove everything else |
+| `--keep-keychain` | Keep the API key in the Keychain |
+| `--keep-login-item` | Leave the macOS login item registered (the release gate uses this so it cannot unregister one on the machine running it) |
+| `--trash-dir PATH` | Move the app bundle into `PATH` instead of the user's Trash |
+| `--help` | Every flag, and what the exit codes mean |
+
+It prints one line per item — `removed`, `trashed`, `planned`, `absent`, `skipped`, `refused`, `failed` —
+plus a final summary, and exits `0` on success, `1` when an item was refused or failed, `2` on a usage
+error. It is the same code the button runs, and the same list.
 
 ---
 

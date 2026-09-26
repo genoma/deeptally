@@ -432,7 +432,8 @@ struct AppModelFixture {
 /// The ledger is always a temporary file and the importer is always ``usageSource``, so a test that
 /// calls `start()` exercises the real import flow without touching the developer's ledger or reading
 /// the real opencode database. `ledgerURL` overrides the file for the tests that need the ledger to
-/// be unopenable.
+/// be unopenable. `uninstaller` overrides the removal path for the same reason: without it the model
+/// would build the shipping one, which acts on this Mac's real home, Trash, Keychain and login item.
 @MainActor
 func makeFixture(
   defaults: UserDefaults,
@@ -441,7 +442,8 @@ func makeFixture(
   settings: AppSettings = .default,
   ledgerURL: URL? = nil,
   usageSource: StubUsageSource = StubUsageSource(),
-  costing: (any RowCosting)? = nil
+  costing: (any RowCosting)? = nil,
+  uninstaller: Uninstaller? = nil
 ) -> AppModelFixture {
   SettingsStore(defaults: defaults).save(settings)
   let fetcher = StubBalanceFetcher(outcome: outcome)
@@ -479,7 +481,8 @@ func makeFixture(
     // Jitter is real runtime behaviour, not the model's arithmetic: pinned to zero so a recorded
     // delay is exactly `PollingPlan`'s backoff.
     jitterFraction: { 0 },
-    localUsageLedger: ledger
+    localUsageLedger: ledger,
+    uninstaller: uninstaller
   )
   return AppModelFixture(
     model: model, fetcher: fetcher, scheduling: scheduling, alerts: alerts, clock: clock,
