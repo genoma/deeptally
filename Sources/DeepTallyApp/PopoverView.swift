@@ -128,11 +128,74 @@ struct PopoverView: View {
           .font(.caption2)
           .help("Quit DeepTally (⌘Q)")
       }
-      // Which store supplies the key, never the key. Worth a line: an environment key works now and
-      // stops working in the next terminal (see docs/USAGE.md).
-      Text(model.keyOriginLabel)
-        .font(.caption2)
-        .foregroundStyle(.secondary)
+      HStack(spacing: 12) {
+        // Which store supplies the key, never the key. Worth a line: an environment key works now and
+        // stops working in the next terminal (see docs/USAGE.md).
+        Text(model.keyOriginLabel)
+          .font(.caption2)
+          .foregroundStyle(.secondary)
+        Spacer(minLength: 8)
+        Button("Uninstall DeepTally…") { confirmUninstall() }
+          .buttonStyle(.link)
+          .font(.caption2)
+          .disabled(model.isTransferringLedger)
+          .help(
+            model.isTransferringLedger
+              ? "A CSV transfer is in progress; the ledger cannot be removed until it finishes."
+              : "Remove DeepTally, its ledger, its caches, its preferences and the Keychain item."
+          )
+      }
+    }
+  }
+
+  // MARK: - Uninstall
+
+  /// The confirmation, and the only place the popover decides anything about the removal: the alert
+  /// lists what the uninstaller would remove, and the model does the work.
+  ///
+  /// *Export CSV First…* writes the ledger where the user chooses and then continues with the
+  /// uninstall, which is the whole point of offering it here: the ledger is the one file that cannot
+  /// be recreated later.
+  private func confirmUninstall() {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "Uninstall DeepTally?"
+    alert.informativeText = model.uninstallPlanText
+    alert.addButton(withTitle: "Uninstall")
+    alert.addButton(withTitle: "Export CSV First…")
+    alert.addButton(withTitle: "Cancel")
+    switch alert.runModal() {
+    case .alertFirstButtonReturn:
+      uninstallAndReport()
+    case .alertSecondButtonReturn:
+      // The export runs in the model's own task, so the continuation is a task too; a cancelled
+      // save panel or a failed write ends here, with the ledger still in place.
+      Task { @MainActor in
+        guard await model.exportLedgerThenUninstall() else { return }
+        uninstallAndReport()
+      }
+    default:
+      break
+    }
+  }
+
+  /// Runs the uninstall and reports it. When everything was removed the bundle is already in the
+  /// Trash, so the only button offered is the one that ends the process; a refusal or a failure
+  /// leaves the app where it is and says so.
+  private func uninstallAndReport() {
+    model.uninstall()
+    guard let report = model.uninstallReport else { return }
+    let alert = NSAlert()
+    alert.messageText =
+      report.isComplete ? "DeepTally has been uninstalled" : "DeepTally was not fully removed"
+    alert.informativeText = report.text
+    if report.isComplete {
+      alert.addButton(withTitle: "Quit DeepTally")
+      alert.runModal()
+      NSApplication.shared.terminate(nil)
+    } else {
+      alert.addButton(withTitle: "OK")
+      alert.runModal()
     }
   }
 }

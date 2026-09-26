@@ -65,6 +65,9 @@ final class AppModel {
   private(set) var isTransferringLedger = false
   /// The last transfer's report or failure, one sentence, or `nil` before any transfer ran.
   private(set) var ledgerTransferMessage: String?
+  /// The last uninstall's report, or `nil` before one ran. `isComplete` is what the view answers
+  /// with: a complete report means the app is in the Trash and this process should quit.
+  private(set) var uninstallReport: Uninstaller.Report?
 
   /// Written by `SettingsPanel` through `@Bindable`; every write is validated, persisted and acted
   /// on in ``settingsDidChange(from:)``.
@@ -86,6 +89,9 @@ final class AppModel {
   private let scheduling: any AppScheduling
   /// Injection seam: the login item. See ``LoginItemControl``.
   private let loginItem: LoginItemControl
+  /// The uninstaller behind *Uninstall DeepTally…*, with the app's login item and Keychain item.
+  /// See ``Uninstaller``.
+  private let uninstaller: Uninstaller
   /// The one owner of the ledger. Injected so the app-layer tests can hand in a source they drive
   /// instead of the developer's opencode database; see ``LocalUsageLedger``.
   private let localUsageLedger: LocalUsageLedger
@@ -135,7 +141,8 @@ final class AppModel {
     loginItem: LoginItemControl = .system,
     now: @escaping @MainActor () -> Date = { Date() },
     jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
-    localUsageLedger: LocalUsageLedger? = nil
+    localUsageLedger: LocalUsageLedger? = nil,
+    uninstaller: Uninstaller? = nil
   ) {
     self.environment = environment
     self.scheduler = scheduler
@@ -144,6 +151,9 @@ final class AppModel {
     self.now = now
     self.jitterFraction = jitterFraction
     self.localUsageLedger = localUsageLedger ?? environment.makeLocalUsageLedger()
+    self.uninstaller =
+      uninstaller
+      ?? Uninstaller.shipping(loginItem: loginItem, keychain: environment.keychain)
     self.calendar = environment.calendar
     self.ledgerCurrency = environment.priceTable.currency
     let settings = environment.settingsStore.load()
@@ -609,19 +619,42 @@ final class AppModel {
     guard !isTransferringLedger else { return }
     isTransferringLedger = true
     ledgerTransferMessage = nil
-    let ledger = localUsageLedger
     Task { [weak self] in
-      do {
-        let outcome = try await ledger.exportCSV(to: url)
-        guard let self else { return }
-        self.isTransferringLedger = false
-        self.ledgerTransferMessage =
-          "Exported \(Self.rowCount(outcome.rows)) to \(url.lastPathComponent)."
-      } catch {
-        guard let self else { return }
-        self.isTransferringLedger = false
-        self.ledgerTransferMessage = Self.describeTransferFailure(error)
-      }
+      guard let self else { return }
+      await self.performExport(to: url)
+    }
+  }
+
+  /// *Export CSV First…* in the uninstall alert: the ledger is written to a path the user picks, and
+  /// only then does the uninstall continue. `true` means the file is on disk and the caller may
+  /// remove the ledger.
+  ///
+  /// A cancelled save panel cancels the uninstall, and so does a failed export: continuing would
+  /// delete the very ledger the user just asked to keep.
+  func exportLedgerThenUninstall() async -> Bool {
+    guard !isTransferringLedger else { return false }
+    let name = LedgerPanels.suggestedExportName(now: now())
+    guard let url = LedgerPanels.chooseExportURL(suggestedName: name) else { return false }
+    isTransferringLedger = true
+    ledgerTransferMessage = nil
+    return await performExport(to: url)
+  }
+
+  /// One export and the sentence it leaves behind, on the main actor. Both entry points end here, so
+  /// the flag and the message can never disagree about whether a transfer is running.
+  @discardableResult
+  private func performExport(to url: URL) async -> Bool {
+    let ledger = localUsageLedger
+    do {
+      let outcome = try await ledger.exportCSV(to: url)
+      isTransferringLedger = false
+      ledgerTransferMessage =
+        "Exported \(Self.rowCount(outcome.rows)) to \(url.lastPathComponent)."
+      return true
+    } catch {
+      isTransferringLedger = false
+      ledgerTransferMessage = Self.describeTransferFailure(error)
+      return false
     }
   }
 
@@ -685,6 +718,23 @@ final class AppModel {
     default:
       return "The CSV transfer failed."
     }
+  }
+
+  // MARK: - Uninstall
+
+  /// What the confirmation alert lists: the plan against the real home, this bundle and the real
+  /// Trash, derived from the uninstaller that will do the work.
+  var uninstallPlanText: String { uninstaller.plan().confirmationText }
+
+  /// Removes DeepTally: the popover calls this after the user confirmed, and the alert reports
+  /// `uninstallReport` afterwards.
+  ///
+  /// Nothing runs while a CSV transfer is in flight: both the ledger connection and the popover's
+  /// button treat that as one operation, and removing the ledger under a running export would
+  /// produce a half-written file.
+  func uninstall() {
+    guard !isTransferringLedger else { return }
+    uninstallReport = uninstaller.run()
   }
 
   // MARK: - Menu bar
