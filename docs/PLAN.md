@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Step 0 complete · Step 1 in progress · **Last updated:** 2026-09-24 · **Owner:** @genoma
+**Status:** Step 5 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -212,11 +212,14 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
       copy's timestamps are both below the watermark and another copy was touched. No ledger effect today
       (equal counters are left alone); it can change which model a report names. The importer's comment
       states it plainly.
-    - **Rollup reader (Step 5):** nothing reads the `daily` table yet, so a pruned range is gone from
-      `deeptally usage` even though its aggregate survives. The command, its help and the docs now say so.
+    - **Rollup reader (closed in Step 5):** nothing read the `daily` table, so a pruned range was gone
+      from `deeptally usage` even though its aggregate survived. `LedgerStore.usageWindow` now reads it
+      (whole UTC days only), and the command, its help and the docs say what that resolution costs.
     - **Rollup versus full resync (pre-existing):** a `--full` resync after a prune rebuilds only the days
-      it touches from the surviving rows, so a partly pruned day can lose the rest of its kept aggregate.
-      The old whole-table rebuild had the same hole; `usage` does not read rollups today.
+      it touches from the surviving rows, so a day that a resync re-inserts *part* of can lose the rest
+      of its kept aggregate. A prune itself removes whole UTC days, so it cannot leave the half-day case;
+      the hole needs opencode to have lost rows the import can no longer offer. Step 5 makes it visible
+      rather than silent: the day is reported as a rollup day.
   - **Environment note (2026-09-25):** the machine spent the night in DarkWake cycles (~16-minute
     maintenance wakes). Two effects, both diagnosable and neither a code defect: four lane runs stalled at
     their 30-minute deadline during throttled windows, and the Keychain returned `-25320 In dark wake, no
@@ -224,15 +227,46 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     intends. The menu bar shows a stale reading until the Mac is awake and the key resolves again.
 
 ### Step 5 — Analytics popover + exports
+**Status:** complete — acceptance-reviewed 2026-09-26 (findings below)
 - [x] Menu bar metric modes (balance / today $ / cache %), thresholds — landed with Step 4's ledger
-- [ ] Popover analytics: today/7d/30d spend, cache-hit %, per-model breakdown, cache trend
-- [ ] **Rollup reader**: the long-range view reads `daily` so pruned history stays visible. Until this
-      exists a pruned range is gone from `deeptally usage`, which the command, its help and the docs now say
-- [ ] Fix finding **N4** in the importer (decide each merge group from all of its copies before the watermark
-      filter) and add the fixture the review said was missing
-- [ ] CSV import/export surfaced in the UI (the ledger and CLI already round-trip it)
-  **Gate:** cache % matches a ledger query; export→import round-trips to identical rollups; a pruned range
-  still shows its aggregate through the rollup reader.
+- [x] Popover analytics: today/7d/30d spend, cache-hit %, per-model breakdown, cache trend — the panel and
+      the two menu-bar metrics now come from one `usageWindow` read, so they cannot disagree
+- [x] **Rollup reader**: `LedgerStore.usageWindow(since:until:provider:)` answers each UTC day from `request`
+      while its rows are there and from `daily` once they are not; `deeptally usage` reads through it, so a
+      pruned range stays visible as whole UTC days, with the rollup days counted and an unsliceable partial
+      day named rather than folded in
+- [x] Fix finding **N4** in the importer (decide each merge group from all of its copies before the watermark
+      filter) and add the fixture the review said was missing — the incremental path re-reads every copy of
+      an admitted group (ids chunked at 500, NULL session matched in memory)
+- [x] CSV import/export surfaced in the UI (the ledger round-trips it; the CLI can export, and gained
+      `DEEPTALLY_LEDGER` so a prune or reprice can be tried on a copy)
+
+  **Gate evidence (2026-09-26, all observed on the real 5,275-row ledger):**
+  - **A pruned range still shows its aggregate.** On copies of the real ledger, `usage --json --days 200`
+    before and after `ledger prune --days 30` returns identical numbers for every window (today $0.000000,
+    7 days $0.000000, 30 days $0.424729; the long window $14.378060 · 5,275 requests · 859,652,607 prompt
+    tokens). The prune removed 4,936 raw rows; after it the long window reports **13 rollup days** and no
+    unavailable day, and the human report prints *"note: 13 days in these windows come from the daily
+    rollup table, which is keyed by whole UTC days."* Gate harness: `/tmp/deeptally-step5-gate.sh`.
+  - **cache % matches a ledger query.** The 30-day window's spend, requests, prompt tokens and cache-hit
+    rate were recomputed from `ledger export` output with Python `Decimal` over the same local range
+    (99.2%, spend 0.424729, 279 requests, 41,601,554 prompt tokens) — exact, the rate within the 0.05-pt
+    one-decimal rounding.
+  - **export→import round-trips to identical rollups.** `LedgerTests.csvRoundTrips` now compares the `daily`
+    tables as an ordered text snapshot between the source ledger and a fresh ledger imported from the CSV:
+    identical, besides the raw-summary comparison that was already there.
+  - **N4 non-vacuity:** the new `untouchedWinnerSurvivesIncrementalScan` failed on the unmodified importer
+    (the incremental scan returned the sibling copy's model where a full scan returned the message copy's)
+    and passes after the fix; the lane recorded both runs. The 501-group chunk test pins the chunk split.
+  - **Independent review (fresh context, read-only):** findings and disposition are recorded in the progress
+    log for 2026-09-26.
+  - **Known limitations, tracked rather than hidden:** the `daily` table has no `cache_write` column, so a
+    rollup day reports `cacheWriteTokens = 0` — exact for every row this store writes (cache writes fold
+    into `input`; the real ledger has 0 of 5,275 rows with a nonzero `cache_write`), inexact only for a row
+    written by hand-written SQL. A day that is only partly inside a window and whose raw rows are pruned is
+    named, not guessed at. `ledger reprice` still cannot revise a pruned row.
+  **Gate:** cache % matches a ledger query ✅ · export→import round-trips to identical rollups ✅ · a pruned
+  range still shows its aggregate through the rollup reader ✅
 
 ### Step 6 — Release machinery + uninstaller
 - [ ] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam), `dmg.sh`, `install.sh` (hash-pinned, `--user`), **`uninstall.sh`**
@@ -293,7 +327,7 @@ lanes, one core lane). The fix was either several narrow lanes or the parent doi
 | A typo in the user's price table | Real usage silently billed at zero, and a reprice over the bad table would certify it | Strict parsing + positive-price validation reject the whole table with a sentence naming the model and field (Step 4, F2); the app and CLI surface it instead of pricing around it |
 | A model id the table does not know | `$0.00` rows, which read as *free* rather than *unknown* | The ledger reports unpriced rows (CLI warning, app note); `reprice` repairs stored rows after the table is fixed |
 | Stored cost computed once at import | A table change cannot fix history by re-importing (raw_hash dedupes it) | `reprice` (CLI and app-on-launch) is the repair path; the app runs it once per launch when the table version changed |
-| Rollup versus a later full resync | A partly pruned day can lose the rest of its kept aggregate when a resync rebuilds it | Pre-existing, unchanged by the day-scoped rebuild; `usage` does not read rollups yet. Recorded in Step 5 |
+| Rollup versus a later full resync | A resync that re-inserts only part of a pruned day's rows replaces that day's rollup with the smaller aggregate | A prune removes whole UTC days, so it cannot itself create the half-day case; the hole needs the source to have lost rows. `usage` reads the rollups, so the day is visible as a rollup day rather than silently gone. Recorded in Step 5 |
 | Agent lanes stall or are lost | Work does not land; a lane can report success in words with nothing committed | Small briefs, explicit 60-minute deadlines with checkpointing, one writer per file, and a parent check of branches and diffs (§6) |
 | App-layer claims unverified | Regressions in `AppModel` wiring | Closed in Step 4: `Tests/DeepTallyAppTests` covers the app layer (55 tests) over documented seams |
 
@@ -316,6 +350,9 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | Price-table amounts | **strict**: an unparsable or non-positive amount rejects the whole table, naming the model and field; the balance API's strings stay tolerant because they come from a remote service |
 | Ledger money | **integer micro-USD** exposed as `Decimal` — a deliberate departure from this plan's original `REAL` sketch, because a ledger is the worst place to accept binary-float drift |
 | Model id resolution | **aliases as data** in the price table, four documented rules, case-sensitive, `nil` for anything unrecognised so it can be reported as unpriced rather than priced wrongly |
+| A partly covered UTC day (Step 5) | **named as unavailable only when `daily` holds rows for it**; a day with nothing in either store contributes nothing and is not listed — a note about a day with no usage would read as missing data |
+| New JSON keys (Step 5) | **snake_case** (`rollup_days`, `unavailable_days`), like every other multiword key in the `usage` document |
+| Pointing the CLI at another ledger (Step 5) | **`DEEPTALLY_LEDGER=<path>`**: `HOME` does not redirect application support, so this is the one safe way to try `ledger prune`/`ledger reprice` on a copy. It exists because a gate script of mine got this wrong and pruned the real ledger (see the log) |
 
 ## 10. Progress log
 
@@ -339,3 +376,8 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-24 | 4 | Ledger, importer watermark, aliases, reprice, CLI surface and menu-bar metrics all merged. The real-ledger finding (4,237 rows at $0) is recorded above with the before/after numbers. |
 | 2026-09-24 | 4 | **Orchestration error of mine:** I launched two lanes against the same CLI file in one wave, merged one of them, then merged two further lanes on top before noticing. The union had to be reconciled by a dedicated lane with both test suites as the contract. The docs lane caught it first by observing that the code its documentation described was absent from its base. Lesson recorded: two writers, one file, no arbitration point is a brief-level mistake, not a lane-level one. |
 | 2026-09-25 | 4 | Step 4 closed. Real ledger: 5,275 rows, 0 unpriced, \$14.378060. 319 tests (231 core + 33 CLI + 55 app). Independent acceptance review: every finding closed, no blockers. Six of its eight follow-ups fixed in the same step; N4 documented as a limitation. Also ported the app-side cost repair, which I had previously reported as delivered while its branch sat unmerged — reported, then corrected here. |
+| 2026-09-26 | 5 | **Orchestration note of mine:** the first lane launch had no `cwd`, so worktree admission failed before dispatching anything; relaunched with the repo as cwd, nothing lost. |
+| 2026-09-26 | 5 | Wave 1 lanes merged: **N4** (`9c6ada1`; the incremental scan re-reads all copies of an admitted group, ids chunked at 500, NULL matched in memory; new test failed before the fix and passes after) and the **rollup reader** (`96e0c00`; `usageWindow`, CLI reads through it, prune wording corrected). The parent review of the rollup lane sent it back with three findings — `unavailableDays` fired on usage-free boundary days, the new JSON keys were camelCase in a snake_case document, and `ARCHITECTURE.md` still said the rollups were never read — all three fixed in `76a194e` and merged with it. |
+| 2026-09-26 | 5 | Parent work merged: CSV export/import in the popover (`ec87f14`), analytics panel + trend scale (`da38375`), then the wiring that reads both menu-bar metrics and the panel from one `usageWindow` pass (`4b64c00`) so a prune cannot blank either. The panel's provenance note was summing nested windows and counting a pruned day three times; fixed to use the largest window, like the CLI. The bulk of the step's test count: 347 tests (242 core + 38 CLI + 67 app). |
+| 2026-09-26 | 5 | **Operational mistake of mine, recovered, and turned into a feature.** The first gate script pointed the CLI at a copy with `HOME=...`; macOS resolves the application-support directory from the real home, so `ledger prune --days 30` deleted **4,936 raw rows from the real ledger** (rollups and watermark untouched). `deeptally import --full` re-inserted exactly those rows — "Imported 4936 new rows of 5275 offered" — and the long-window totals are byte-identical to the pre-accident ones ($14.378060 · 5,275 requests · 859,652,607 prompt tokens). The durable fix is `DEEPTALLY_LEDGER=<path>` (`2423fea`), documented in the help and USAGE.md with the `HOME` trap named. An earlier "verification" of mine had checked the report but not the ledger path the CLI printed; the check that failed is now a test. |
+| 2026-09-26 | 5 | **Step 5 gate passed** (harness `/tmp/deeptally-step5-gate.sh`, real ledger): window numbers identical before/after a 30-day prune; the long window reports 13 rollup days with no spurious unavailable day; the 30-day window matches the exported raw rows to the micro-dollar (spend 0.424729, 279 requests, 41,601,554 prompt tokens, 99.2% cache hit); `csvRoundTrips` compares the `daily` tables between a source ledger and a fresh ledger imported from its export — identical. Independent read-only review convened on `2351178..2423fea`; findings recorded with their disposition. |
