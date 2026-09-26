@@ -19,7 +19,7 @@ DeepTally shows three numbers, from two different sources.
 | Metric | Source | What it measures |
 |---|---|---|
 | **Balance** | `GET /user/balance` | The account's own figure, in the account's own currency, as of the last fetch. |
-| **Today's spend** | The local ledger | What the requests imported today cost, each priced with the peak/off-peak window it fell in. |
+| **Today's spend** | The local ledger | What the requests recorded today cost, each priced with the peak/off-peak window it fell in. |
 | **Cache-hit rate** | The local ledger | Cache-read tokens ÷ prompt tokens over the **trailing 30 local days**. |
 
 **There is no historical usage API.** DeepSeek publishes a balance endpoint, per-response usage counters, and
@@ -33,8 +33,13 @@ launch, then every 15 minutes, on a fixed cadence with nothing to configure. `de
 on demand. If you do not use opencode there is nothing to import, which is a normal state rather than an
 error — the metrics stay em dashes and Settings says so ([`INSTALL.md`](INSTALL.md)).
 
-- **Each row is priced once, at import**, with the peak/off-peak window in force **at that row's own
-timestamp** — importing an old row today does not restate it at today's prices.
+A second, opt-in source captures at the API boundary instead: point a client at DeepTally's **local proxy**
+and each response's own usage is recorded as it passes through. That is the way in for a client DeepTally
+cannot import from, and for one ledger across several clients — see
+[Capturing any client's usage (local proxy)](#capturing-any-clients-usage-local-proxy).
+
+- **Each row is priced once, when it is written**, with the peak/off-peak window in force **at that row's
+own timestamp** — importing an old row today does not restate it at today's prices.
 - **The import is incremental.** The ledger remembers the newest instant it has already imported (a
 watermark), so a second run adds nothing. `deeptally import --full` rescans everything instead, which is the
 repair pass for a row whose timestamp arrived behind the watermark.
@@ -371,6 +376,83 @@ which). Errors go to stderr.
 
 ---
 
+## Capturing any client's usage (local proxy)
+
+The opencode import reaches exactly one tool. Anything else — pi, another harness, an editor extension, a
+script — keeps its usage somewhere DeepTally cannot see it, because DeepSeek publishes no usage or spend
+endpoint: the account has `/user/balance`, and each response carries its own `usage` counters, nothing that
+answers "what did I spend last Tuesday". So DeepTally can capture at the API boundary instead: an optional
+**local proxy** that sits between a client and `api.deepseek.com`, reads the `usage` object out of each
+response as it passes through, and records it in the same ledger.
+
+Turn it on in **Settings → Local usage proxy** — off by default, at port **8787** — and point the client's
+base URL at `http://127.0.0.1:8787`. That is the whole setup:
+
+- the proxy binds `127.0.0.1` only, so it is reachable from your Mac and not from the network;
+- it forwards to `https://api.deepseek.com` only, path preserved, and the response streams back to the
+  client unchanged;
+- every completed completion whose response carries usage becomes **one ledger row** — the response's own
+  counters, its model id and response `id`, the observation time — with `source: proxy`, priced by the same
+  price table and peak/off-peak rules as every other row, and reported by `deeptally usage` and the popover
+  like anything else.
+
+**When to use it.** Any client DeepTally cannot import from — pi, a harness with no local database, an
+editor extension, a one-off `curl`. Or a machine where you want one ledger for several clients: point each
+of them at the same port, and every row carries the model the response named.
+
+**What it does not record.** Requests that carry no usage — balance calls, model listings, cancelled and
+failed calls — write nothing. Nothing is backfilled either: DeepSeek has no usage endpoint, so calls made
+before you turned the proxy on cannot be recovered, and the ledger only ever holds what a client sent
+through the port while it was on. Turn the proxy off (or point the client back at `api.deepseek.com`) and it
+goes straight to DeepSeek again; the balance is unaffected either way, because it always came from
+`/user/balance`.
+
+**One limit.** The proxy forwards `GET` and `POST`; a request body sent with `Transfer-Encoding: chunked` is
+refused with `501` — the clients in the examples below send a `Content-Length` instead.
+
+The proxy sees the request body and the `Authorization` header while a request transits it. It stores
+counters, model and response id only; it never logs or stores a body, a header or the key — the exact
+statement is in [`PRIVACY.md`](PRIVACY.md#the-local-proxy).
+
+### pi
+
+Register the provider with a base URL of `http://127.0.0.1:8787`. pi's custom-provider mechanism keeps the
+built-in models when only a base URL is registered, so `deepseek/…` still resolves — see pi's own
+custom-provider documentation for the registration itself. Every pi request then travels through the proxy,
+and each response's usage becomes a ledger row.
+
+### opencode
+
+Add a provider block to `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "provider": {
+    "deepseek": {
+      "options": { "baseURL": "http://127.0.0.1:8787" }
+    }
+  }
+}
+```
+
+Nothing else in opencode changes: its DeepSeek requests now go through the proxy, and the response usage
+lands in the ledger as it passes back.
+
+### curl
+
+The same `Authorization` header you already use, pointed at the port — two lines:
+
+```sh
+curl http://127.0.0.1:8787/chat/completions -H "Authorization: Bearer $DEEPSEEK_API_KEY" -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-flash","messages":[{"role":"user","content":"Say hi."}]}'
+```
+
+The response comes back exactly as `api.deepseek.com` sent it, and the completion's usage lands in the
+ledger. Add `"stream": true` to the body and the call streams through the proxy like any other; the usage
+arrives on the final chunk and is recorded when the stream ends.
+
+---
+
 ## What the popover shows
 
 The popover is a fixed 320 × 420 pt panel that scrolls; the settings block is taller than the window. It is
@@ -499,8 +581,8 @@ General → Login Items."*, *"macOS has no login item for DeepTally; registratio
 
 ### 7. Settings
 
-The settings block — refresh cadence, threshold, menu bar metric, notifications and the key row. It sits
-below the popover's fold (scroll the popover to reach it), and it is all in the reference below.
+The settings block — refresh cadence, threshold, menu bar metric, notifications, the local proxy and the key
+row. It sits below the popover's fold (scroll the popover to reach it), and it is all in the reference below.
 
 ### 8. Footer
 
@@ -519,6 +601,7 @@ bare binary), *"local-only"* and a **Quit** button. The second is the key-store 
 | **Menu bar** | picker | Balance | Which metric the title shows: **Balance**, **Today's spend** (your local day, in the price table's currency) or **Cache-hit rate** (cache reads ÷ prompt tokens over the last 30 local days; `—` when there is no denominator). The picker's tooltip names the two windows. If local usage is not being imported, a quiet line below says so and the picker stays usable. |
 | **Notify on low balance** | switch | on | A macOS notification when the balance falls below the threshold: *"DeepSeek balance is low"* / *"Balance $1.42 is below your $2.00 threshold."* macOS asks for permission once, at launch. An alert counts as sent only after macOS accepts it, so a denial or a failed post is retried instead of consuming the cooldown — and the **menu-bar warning glyph** (above) carries a low balance whenever macOS will not deliver the alert. While the switch is on and macOS reports the permission denied, the panel adds one line: *"macOS notifications are off for DeepTally, so low-balance alerts are not delivered. While the balance is low the menu bar shows a warning glyph; re-allow DeepTally in System Settings → Notifications to get the alert."* |
 | **Notify again after** | stepper | 12h | 15 min – 7 days (10 080 min) in 30-minute steps, shown as `12h`, `30 min`, `1h 30m`. A balance that stays low re-alerts at most once per cooldown, and the time of the last **delivered** alert survives a relaunch. Only a low balance triggers an alert; an old reading neither triggers nor silences one. The stepper is disabled while **Notify on low balance** is off. |
+| **Local usage proxy** | switch + port stepper | off, port 8787 | Runs the loopback proxy on `127.0.0.1` that records each response's usage for the clients you point at it. The port is 1024–65535; the client's base URL is `http://127.0.0.1:<port>`. Nothing listens while the switch is off, and every row it captures is stored with `source: proxy` (see [Capturing any client's usage (local proxy)](#capturing-any-clients-usage-local-proxy)). |
 | **Import from shell** | zsh / bash buttons | — | The one-time Keychain import (above). |
 | **Forget key** | button | — | Deletes the Keychain item. If `DEEPSEEK_API_KEY` is still exported, the CLI says so on stderr so you are not told the key is gone while it still works. |
 
