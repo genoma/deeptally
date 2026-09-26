@@ -882,6 +882,91 @@ struct OpenCodeImporterIncrementalTests {
     #expect(scan.records.first?.record.usage.cacheMissTokens == 100)
   }
 
+  @Test("an incremental scan picks the same copy a full scan does when the winner was not touched")
+  func untouchedWinnerSurvivesIncrementalScan() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createMessageTable()
+    try fixture.createSessionMessageTable()
+
+    let created: Int64 = 1_787_800_000_000
+    // Identical counters: the union's tie-break (message wins when the copies agree) decides this
+    // group, so only the models distinguish the two copies.
+    let overlapTokens = TokenSpec(input: 100, output: 40, cacheRead: 20)
+    // The copy a full scan chooses, last touched a second before the watermark the next scan resumes
+    // from, so the SQL time pre-filter has no reason to return it.
+    try fixture.insert(
+      row(
+        id: "msg_overlap",
+        sessionID: "ses_overlap",
+        created: created,
+        updated: created,
+        data: generationAMessage(
+          modelID: "message-copy", createdMilliseconds: created, tokens: overlapTokens)),
+      into: "message")
+    // Its sibling was touched after that watermark, with a different model.
+    try fixture.insertSessionMessage(
+      row(
+        id: "msg_overlap",
+        sessionID: "ses_overlap",
+        created: created,
+        updated: created + 4_000,
+        data: generationBMessage(
+          modelID: "session-copy", createdMilliseconds: created, tokens: overlapTokens)),
+      type: "assistant")
+
+    let full = try importer(for: fixture).importAll(since: nil)
+    #expect(full.records.count == 1)
+    #expect(full.records.map(\.record.model) == ["message-copy"])
+
+    // The touched sibling admits the group, and the merge must still see both copies (review finding
+    // N4): the incremental scan returns exactly the full scan's record, not the touched copy.
+    let watermark = Date(timeIntervalSince1970: TimeInterval(created) / 1_000 + 1)
+    let incremental = try importer(for: fixture).importAll(since: watermark)
+
+    #expect(incremental.records.count == 1)
+    #expect(incremental.records == full.records)
+    #expect(incremental.latestSeen == full.latestSeen)
+  }
+
+  @Test(
+    "an incremental scan re-reads every admitted group when the id list crosses a chunk boundary"
+  )
+  func admittedGroupsSpanningChunksAreAllReRead() throws {
+    let fixture = try FixtureDatabase()
+    defer { fixture.destroy() }
+    try fixture.createMessageTable()
+    try fixture.createSessionMessageTable()
+
+    // One more group than a single id chunk holds, so the second query is issued at least twice and
+    // the last chunk is a partial one.
+    let groupCount = 501
+    let created: Int64 = 1_787_800_000_000
+    let tokens = TokenSpec(input: 10)
+    for offset in 0..<groupCount {
+      let session = "ses_chunk_\(offset)"
+      try fixture.insert(
+        row(
+          id: "msg_chunk_\(offset)", sessionID: session, created: created,
+          data: generationAMessage(
+            modelID: "message-copy", createdMilliseconds: created, tokens: tokens)),
+        into: "message")
+      try fixture.insertSessionMessage(
+        row(
+          id: "msg_chunk_\(offset)", sessionID: session, created: created,
+          updated: created + 4_000,
+          data: generationBMessage(
+            modelID: "session-copy", createdMilliseconds: created, tokens: tokens)),
+        type: "assistant")
+    }
+
+    let watermark = Date(timeIntervalSince1970: TimeInterval(created) / 1_000 + 1)
+    let scan = try importer(for: fixture).importAll(since: watermark)
+
+    #expect(scan.records.count == groupCount)
+    #expect(scan.records.allSatisfy { $0.record.model == "message-copy" })
+  }
+
   @Test("a row deleted from the ledger is re-inserted by the next full scan, and only that row")
   func deletedRowIsReinserted() throws {
     let fixture = try FixtureDatabase()
