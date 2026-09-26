@@ -16,9 +16,6 @@ struct SettingsPanel: View {
   /// Alerts are switched on but macOS reports them denied: the one calm line that says so, and what
   /// carries a low balance instead.
   private let alertsUnavailable: Bool
-  /// The one quiet line under the metric picker while local usage is not being imported, or `nil`
-  /// when it is. Never an error: the balance, the alerts and the rate panel are unaffected by it.
-  private let localUsageNote: String?
   private let onImportFromShell: (ShellKind) -> Void
   private let onDeleteKey: () -> Void
 
@@ -27,7 +24,6 @@ struct SettingsPanel: View {
     isImportingKey: Bool,
     importMessage: String?,
     alertsUnavailable: Bool = false,
-    localUsageNote: String? = nil,
     onImportFromShell: @escaping (ShellKind) -> Void,
     onDeleteKey: @escaping () -> Void
   ) {
@@ -35,7 +31,6 @@ struct SettingsPanel: View {
     self.isImportingKey = isImportingKey
     self.importMessage = importMessage
     self.alertsUnavailable = alertsUnavailable
-    self.localUsageNote = localUsageNote
     self.onImportFromShell = onImportFromShell
     self.onDeleteKey = onDeleteKey
   }
@@ -117,12 +112,6 @@ struct SettingsPanel: View {
         .fixedSize()
         .help(Self.metricHelp)
         .accessibilityLabel("Menu bar metric")
-      }
-      if let localUsageNote {
-        Text(localUsageNote)
-          .font(.caption2)
-          .foregroundStyle(.secondary)
-          .fixedSize(horizontal: false, vertical: true)
       }
     }
   }
@@ -266,7 +255,6 @@ struct SettingsPanelPreviews: PreviewProvider {
         isImportingKey: false,
         importMessage: nil,
         alertsUnavailable: true,
-        localUsageNote: "Local usage is not being imported yet.",
         onImportFromShell: { _ in },
         onDeleteKey: {}
       )

@@ -48,9 +48,11 @@ struct LocalUsageAnalyticsTests {
   func rollupNoteCountsDays() {
     let singular = LocalUsageAnalytics(windows: [window(rollupDays: 1)], models: [], days: [])
     #expect(singular.rollupNote == "1 day from the daily rollups (UTC days).")
+    // The windows nest (today inside 7 days inside 30 days), so the note reports the largest one's
+    // count rather than adding the same pruned day three times.
     let plural = LocalUsageAnalytics(
       windows: [window(rollupDays: 12), window(rollupDays: 3)], models: [], days: [])
-    #expect(plural.rollupNote == "15 days from the daily rollups (UTC days).")
+    #expect(plural.rollupNote == "12 days from the daily rollups (UTC days).")
   }
 
   @Test("a partly pruned day is named as not counted, and both facts can be true at once")
@@ -64,6 +66,12 @@ struct LocalUsageAnalyticsTests {
     #expect(
       both.rollupNote
         == "4 days from the daily rollups (UTC days); 2 partly pruned not counted.")
+    // The same partial day can be outside two nested windows; it is one day, not two.
+    let shared = LocalUsageAnalytics(
+      windows: [
+        window(unavailableDays: ["2026-08-12"]), window(unavailableDays: ["2026-08-12"]),
+      ], models: [], days: [])
+    #expect(shared.rollupNote == "1 partly pruned day not counted.")
   }
 
   @Test("an empty ledger has no usage, a ledger with only missing days has none either")

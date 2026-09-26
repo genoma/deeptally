@@ -702,6 +702,19 @@ struct LedgerWriteTests {
     // Costs survive to the micro-dollar: 0.123456 exports and re-imports without drift.
     #expect(after.spendUSD == before.spendUSD)
 
+    // The rollups are a second derived store, rebuilt from the imported rows. The round trip has to
+    // reproduce them day by day, not only the raw summary — and the comparison is the tables
+    // themselves, because `usageWindow` prefers raw rows and would not read `daily` here.
+    let dailySnapshot = """
+      SELECT date || '|' || provider || '|' || model || '|' || input || '|' || output || '|' ||
+             reasoning || '|' || cache_read || '|' || cost_micro_usd || '|' || request_count
+        FROM daily ORDER BY date, provider, model
+      """
+    let rollupsBefore = try RawLedger(url: fixture.url).strings(dailySnapshot)
+    let rollupsAfter = try RawLedger(url: fresh.url).strings(dailySnapshot)
+    #expect(!rollupsBefore.isEmpty)
+    #expect(rollupsAfter == rollupsBefore)
+
     #expect(try fresh.store.importCSV(from: csvURL) == 0)
     #expect(try fresh.store.summary(since: allTime.since, until: allTime.until) == after)
   }

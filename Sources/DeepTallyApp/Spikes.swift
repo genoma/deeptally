@@ -153,7 +153,6 @@ enum Spikes {
       isImportingKey: false,
       importMessage: nil,
       alertsUnavailable: model.alertsUnavailable,
-      localUsageNote: model.localUsageNote,
       onImportFromShell: { _ in },
       onDeleteKey: {}
     )

@@ -417,6 +417,9 @@ struct AppModelFixture {
   let loginItem: LoginItemStub
   /// The rows the ledger pass imports, so a test can see how often and from where it scanned.
   let usageSource: StubUsageSource
+  /// The file this fixture's ledger lives in, for the tests that prune or inspect it directly.
+  /// Always a temporary path; `makeFixture` never opens the developer's ledger.
+  let ledgerURL: URL
 }
 
 /// Builds the model a test drives.
@@ -480,7 +483,7 @@ func makeFixture(
   )
   return AppModelFixture(
     model: model, fetcher: fetcher, scheduling: scheduling, alerts: alerts, clock: clock,
-    loginItem: loginItem, usageSource: usageSource)
+    loginItem: loginItem, usageSource: usageSource, ledgerURL: environment.ledgerURL)
 }
 
 // MARK: - Waiting

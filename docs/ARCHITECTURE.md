@@ -192,19 +192,20 @@ Deviations from the sketch in [`PLAN.md`](PLAN.md) §4:
 
 `request.ts` is UTC epoch seconds; `daily` is keyed by **UTC date**, which is what makes a long-range query
 cheap and a prune safe. But "what did I spend today" is a question about the user's clock, and a local
-midnight can fall in the middle of a UTC day. So a local-day figure is never read out of the rollup: the
-app's `LocalUsageLedger` builds `[start of a local day, start of the next)` with `Calendar` and asks
-`summary(since:until:)` of the raw rows. Reading "today" out of the UTC rollup would be off by a day for
-every user east or west of UTC — the kind of bug that looks like a rounding error. Days are added through
-the calendar rather than as 86 400 seconds, so a DST day stays a whole local day.
+midnight can fall in the middle of a UTC day, so a local-day range is never *treated* as a run of UTC days:
+the app's `LocalUsageLedger` and `deeptally usage` both build `[start of a local day, start of the next)`
+with `Calendar` — days added through the calendar rather than as 86 400 seconds, so a DST day stays a whole
+local day — and hand that range to the reader below. Reading "today" as the UTC day in the rollup would be
+off by a day for every user east or west of UTC — the kind of bug that looks like a rounding error.
 
-`usageWindow(since:until:provider:)` is the one reader that does use `daily`, and it does so without that
-bug: it walks the UTC days a range touches and answers each one from `request` while that day still has
-rows, and from `daily` once a prune has taken them — whole UTC days only, which is all a rollup holds. A day
-the range only partly covers is never read from the rollup, because a whole-day aggregate used for part of
-a day would over-count; when `daily` holds rows for such a day it is named as unavailable rather than folded
-in, and a day with no rows in either store contributes nothing. `deeptally usage` builds its windows this
-way, so a pruned range stays visible at the resolution the rollup has, and says so when it is.
+`usageWindow(since:until:provider:)` is the one reader that uses `daily`, and it does so at UTC-day
+granularity: it walks the UTC days a range touches and answers each one from `request` while that day still
+has rows, and from `daily` once a prune has taken them — whole UTC days only, which is all a rollup holds. A
+day the range only partly covers is never read from the rollup, because a whole-day aggregate used for part
+of a day would over-count; when `daily` holds rows for such a day it is named as unavailable rather than
+folded in, and a day with no rows in either store contributes nothing. `deeptally usage`, the app's two
+menu-bar ledger metrics and its analytics panel all read through it, so recent days are exact and a pruned
+range stays visible at the resolution the rollup has — and the report says which days came from it.
 
 ### The watermark, and why re-running is free
 
@@ -308,7 +309,7 @@ shows "what am I paying right now" instead of a static price list.
 | `Sources/DeepTallyCore/Pricing/` | `PriceTableLoader` (bundled + user override), `HolidayCalendar`, `PeakOffPeakEngine`, `CostEngine` |
 | `Sources/DeepTallyCore/Rate/RateNowPresenter.swift` | "What am I paying right now", formatted for the injected time zone |
 | `Sources/DeepTallyCore/Import/OpenCodeImporter.swift` | Read-only union of opencode's two schema generations; credential tables denied at the connection |
-| `Sources/DeepTallyCore/Ledger/` | `LedgerStore` (schema, inserts, rollups, prune, CSV), `LedgerSync` (the one incremental flow), `LedgerSummary`, `LedgerCSV`, `LedgerReprice` |
+| `Sources/DeepTallyCore/Ledger/` | `LedgerStore` (schema, inserts, rollups, prune, CSV), `LedgerRollups` (day-window value types), `LedgerSync` (the one incremental flow), `LedgerSummary`, `LedgerCSV`, `LedgerReprice` |
 | `Sources/DeepTallyCore/Resources/` | `PriceTable.json` and `ChinaHolidays.json` — versioned data, not code |
 | `Sources/DeepTallyApp/AppEnvironment.swift` | The composition root (and `LaunchStateStore`); builds the ledger's importer and costing |
 | `Sources/DeepTallyApp/AppModel.swift` | State owner: key origin, polling, refresh, banners, the three menu-bar metrics |

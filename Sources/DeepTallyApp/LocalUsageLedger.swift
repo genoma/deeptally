@@ -35,6 +35,10 @@ actor LocalUsageLedger {
   struct Outcome: Sendable, Equatable {
     /// `nil` only when no read of the ledger has ever succeeded.
     let metrics: LocalUsageMetrics?
+    /// The analytics panel's numbers, read in the same pass as ``metrics``, or `nil` when no read has
+    /// succeeded. Carried in the outcome rather than fetched by a second call so the panel and the
+    /// menu bar can never disagree about what the ledger holds.
+    let analytics: LocalUsageAnalytics?
     /// Why this pass could not import, or `nil` when it did. A diagnostic, never an error message the
     /// user has to act on: the popover turns it into "local usage is not being imported yet".
     let importProblem: String?
@@ -69,6 +73,9 @@ actor LocalUsageLedger {
   private var ledger: LedgerStore?
   /// The last successful read. Survives a failed pass so an import error cannot blank a number.
   private var lastMetrics: LocalUsageMetrics?
+  /// The last successful analytics read, kept beside ``lastMetrics`` and for the same reason: a failed
+  /// pass must leave the panel showing what was true a moment ago, not empty it.
+  private var lastAnalytics: LocalUsageAnalytics?
   /// `true` from the moment the one launch repair is reached, successful or not, so a reprice scan can
   /// never repeat on the fifteen-minute tick. See ``repairStoredCosts(in:)``.
   private var didAttemptRepair = false
@@ -105,7 +112,8 @@ actor LocalUsageLedger {
     } catch {
       // The ledger itself is unusable: no import, no numbers, and the last good ones survive.
       return Outcome(
-        metrics: lastMetrics, importProblem: String(describing: error), pricingNote: nil)
+        metrics: lastMetrics, analytics: lastAnalytics,
+        importProblem: String(describing: error), pricingNote: nil)
     }
 
     // Before the import, so a first run over a fresh ledger records the table without scanning the rows
@@ -123,14 +131,17 @@ actor LocalUsageLedger {
     }
 
     do {
-      let metrics = try Self.readMetrics(from: ledger, now: now, calendar: calendar)
-      lastMetrics = metrics
-      return Outcome(metrics: metrics, importProblem: importProblem, pricingNote: pricingNote)
+      let readings = try Self.readUsage(from: ledger, now: now, calendar: calendar)
+      lastMetrics = readings.metrics
+      lastAnalytics = readings.analytics
+      return Outcome(
+        metrics: readings.metrics, analytics: readings.analytics, importProblem: importProblem,
+        pricingNote: pricingNote)
     } catch {
       // The open and the import both worked and only the read failed, which is not a reason to blank
       // a number that was true a moment ago.
       return Outcome(
-        metrics: lastMetrics,
+        metrics: lastMetrics, analytics: lastAnalytics,
         importProblem: importProblem ?? String(describing: error),
         pricingNote: pricingNote)
     }
@@ -235,26 +246,86 @@ actor LocalUsageLedger {
     return opened
   }
 
-  /// Today's spend and the trailing cache-hit rate, each from its own `ts` range on the raw rows.
+  /// One pass's readings: the two menu bar metrics and the analytics panel's numbers, from the same
+  /// queries so they cannot disagree.
+  private struct Readings {
+    let metrics: LocalUsageMetrics
+    let analytics: LocalUsageAnalytics
+  }
+
+  /// Today's spend, the trailing cache-hit rate, and the analytics panel's three windows, per-model
+  /// breakdown and daily series.
   ///
-  /// The range boundaries are local days computed from `calendar`, which is what `request.ts` range
-  /// queries are for: `daily` is keyed by **UTC** date, so reading "today" out of it is off by a day
-  /// for everyone east or west of UTC. This is the one place those boundaries are built.
-  private static func readMetrics(
+  /// Every range goes through `LedgerStore.usageWindow(since:until:provider:)`, which answers a day
+  /// from `request` while its raw rows are there and from the `daily` rollup once a prune has taken
+  /// them — so pruning never blanks the menu bar metric or the panel. The windows are local days
+  /// because "today" is a question about the user's clock; the rollup days that stand in for pruned
+  /// days are whole UTC days, and the panel says so when any of them appear
+  /// (`LocalUsageAnalytics.rollupNote`).
+  ///
+  /// The range boundaries are built from `calendar`, the one place they are built, and days are added
+  /// through it rather than as 86 400 seconds, so a DST day stays a whole local day.
+  private static func readUsage(
     from ledger: LedgerStore,
     now: Date,
     calendar: Calendar
-  ) throws -> LocalUsageMetrics {
+  ) throws -> Readings {
     let dayStart = calendar.startOfDay(for: now)
     let dayEnd =
       calendar.date(byAdding: .day, value: 1, to: dayStart)
       ?? dayStart.addingTimeInterval(86_400)
-    let windowStart =
-      calendar.date(byAdding: .day, value: 1 - cacheHitWindowDays, to: dayStart)
-      ?? dayStart.addingTimeInterval(-Double(cacheHitWindowDays - 1) * 86_400)
 
-    let today = try ledger.summary(since: dayStart, until: dayEnd)
-    let window = try ledger.summary(since: windowStart, until: dayEnd)
-    return LocalUsageMetrics(todaySpendUSD: today.spendUSD, cacheHitRatio: window.cacheHitRatio)
+    func window(days: Int) throws -> LedgerUsageWindow {
+      let start =
+        calendar.date(byAdding: .day, value: -(days - 1), to: dayStart)
+        ?? dayStart.addingTimeInterval(-Double(days - 1) * 86_400)
+      return try ledger.usageWindow(since: start, until: dayEnd)
+    }
+
+    let today = try window(days: 1)
+    let week = try window(days: 7)
+    let month = try window(days: Self.cacheHitWindowDays)
+
+    let metrics = LocalUsageMetrics(
+      todaySpendUSD: today.summary.spendUSD,
+      cacheHitRatio: month.summary.cacheHitRatio)
+
+    func panelWindow(
+      key: String, label: String, _ window: LedgerUsageWindow
+    ) -> LocalUsageAnalytics.Window {
+      LocalUsageAnalytics.Window(
+        key: key,
+        label: label,
+        spendUSD: window.summary.spendUSD,
+        requestCount: window.summary.requestCount,
+        tokenCount: window.summary.promptTokens + window.summary.outputTokens
+          + window.summary.reasoningTokens,
+        cacheHitRatio: window.summary.cacheHitRatio,
+        rollupDays: window.rollupDayCount,
+        unavailableDays: window.unavailableDays)
+    }
+
+    let analytics = LocalUsageAnalytics(
+      windows: [
+        panelWindow(key: "today", label: "Today", today),
+        panelWindow(key: "last_7_days", label: "7 days", week),
+        panelWindow(key: "last_30_days", label: "\(Self.cacheHitWindowDays) days", month),
+      ],
+      models: month.summary.models.map {
+        LocalUsageAnalytics.ModelRow(
+          provider: $0.provider,
+          model: $0.model,
+          spendUSD: $0.spendUSD,
+          requestCount: $0.requestCount,
+          cacheHitRatio: $0.cacheHitRatio)
+      },
+      days: month.days.map {
+        LocalUsageAnalytics.DayPoint(
+          date: $0.date,
+          spendUSD: $0.summary.spendUSD,
+          requestCount: $0.summary.requestCount,
+          cacheHitRatio: $0.summary.cacheHitRatio)
+      })
+    return Readings(metrics: metrics, analytics: analytics)
   }
 }

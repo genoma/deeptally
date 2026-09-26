@@ -60,9 +60,13 @@ struct LocalUsageAnalytics: Sendable, Equatable {
 
   /// The one sentence that explains a window's provenance, or `nil` when every day came from raw
   /// rows. Both halves can be present: an old pruned day and a partly covered edge day.
+  ///
+  /// The rollup count is the **largest** window's, never the sum: the three windows end with today,
+  /// so they nest and a pruned day inside all three would be counted three times. The unavailable
+  /// dates are deduplicated for the same reason.
   var rollupNote: String? {
-    let rollupDays = windows.reduce(0) { $0 + $1.rollupDays }
-    let unavailable = windows.flatMap(\.unavailableDays)
+    let rollupDays = windows.map(\.rollupDays).max() ?? 0
+    let unavailable = Set(windows.flatMap(\.unavailableDays)).sorted()
     switch (rollupDays, unavailable.isEmpty) {
     case (0, true): return nil
     case (let days, true):

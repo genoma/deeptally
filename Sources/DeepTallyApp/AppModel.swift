@@ -51,6 +51,9 @@ final class AppModel {
   private(set) var loginItemStatus: LoginItem.Status = .notRegistered
   /// The last good reading of the ledger, or `nil` until a pass has successfully read it.
   private(set) var localUsage: LocalUsageMetrics?
+  /// The analytics panel's numbers from the same pass as ``localUsage``. A failed pass leaves the
+  /// last good value in place, exactly as it does for the menu bar metrics.
+  private(set) var localUsageAnalytics: LocalUsageAnalytics?
   /// Why the last ledger pass could not import, or `nil` when it did. Rendered only as the quiet
   /// note in ``localUsageNote``; a missing opencode database is never a banner.
   private(set) var localUsageProblem: String?
@@ -577,11 +580,17 @@ final class AppModel {
       self.isLocalUsageRefreshing = false
       self.localUsageProblem = outcome.importProblem
       self.localUsagePricingNote = outcome.pricingNote
+      // The actor returns the last good analytics when a read fails, so this cannot blank the panel.
+      self.localUsageAnalytics = outcome.analytics
       // A failed pass keeps the last good numbers: blanking them would turn a transient unreadable
       // file into "you spent nothing".
       if let metrics = outcome.metrics { self.localUsage = metrics }
     }
   }
+
+  /// The currency the ledger's amounts were priced in, for the analytics panel. The table's, never
+  /// the account's: a spend figure is never converted (docs/PLAN.md §1).
+  var ledgerCurrencyCode: String { ledgerCurrency }
 
   // MARK: - CSV transfer
 

@@ -21,6 +21,13 @@ struct PopoverView: View {
         Divider()
         RateNowPanel(display: model.rateNow)
         Divider()
+        LocalUsageSection(
+          analytics: model.localUsageAnalytics,
+          currency: model.ledgerCurrencyCode,
+          isRefreshing: model.isLocalUsageRefreshing,
+          note: model.localUsageNote,
+          onRefresh: { model.refreshLocalUsage() })
+        Divider()
         LedgerTransferSection(
           isTransferring: model.isTransferringLedger,
           message: model.ledgerTransferMessage,
@@ -101,7 +108,6 @@ struct PopoverView: View {
       isImportingKey: model.isImportingKey,
       importMessage: model.importMessage,
       alertsUnavailable: model.alertsUnavailable,
-      localUsageNote: model.localUsageNote,
       onImportFromShell: { model.importKey(from: $0) },
       onDeleteKey: { model.deleteKey() }
     )

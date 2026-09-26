@@ -443,7 +443,29 @@ Chinese public holidays); only the presentation is local. If the bundled price t
 section says *"Rate information is not available yet."* and a banner above names the problem; an invalid user
 override falls back to the bundled table instead, so prices stay on screen.
 
-### 4. Local usage file
+### 4. Local usage
+
+What the ledger holds, read on the same fifteen-minute cadence as the import (and immediately when you press the
+refresh button next to the heading):
+
+- **Three windows** — **Today**, **7 days**, **30 days** — each with spend in the price table's currency and the
+  cache-hit rate for that window. They end with today, so each total contains the one before it.
+- **Cache hit**, one bar per UTC day that recorded usage over the last 30 days, drawn against 0–100% rather than
+  against the best day in the series — a 55% day is drawn at 55% even if every other day was worse. A day with
+  no usage has no bar (a faint stub), and hovering a bar names its date and rate.
+- **Per model**, the last 30 days: each model's spend, requests and cache-hit rate.
+
+Two notes can appear under the panel. The first is about provenance: when a day's raw rows have been pruned, its
+numbers come from the daily rollups, which are keyed by **whole UTC days** — the panel says how many such days it
+used, and names any day a window only partly covers, because a whole-day rollup cannot be sliced. The second is
+the quiet caveat that also appears when opencode is absent or a row has no price: *“Local usage is not being
+imported yet.”*, or the unpriced-rows sentence. Neither is a banner; the balance, the alerts and the rate panel
+are unaffected by both.
+
+The menu bar's **Today's spend** and **Cache-hit rate** metrics read exactly the same windows, so the panel and
+the menu bar can never disagree about what the ledger holds.
+
+### 5. Local usage file
 
 The ledger's two CSV actions, in the order you would use them.
 
@@ -460,7 +482,7 @@ menu bar metrics and the unpriced-rows note immediately, instead of waiting for 
 pass. Exporting is also the first thing to do before uninstalling, since the ledger is the only copy of
 your history.
 
-### 5. Startup
+### 6. Startup
 
 **Startup** holds one switch, **Launch at login**. It registers DeepTally through macOS
 `SMAppService.mainApp` — no helper bundle, no LaunchAgent (that was measured as unnecessary,
@@ -469,12 +491,12 @@ wants something from you, a line below the switch says so: *"Waiting for approva
 General → Login Items."*, *"macOS has no login item for DeepTally; registration works best from
 /Applications."*, or an unknown-status report.
 
-### 6. Settings
+### 7. Settings
 
 The settings block — refresh cadence, threshold, menu bar metric, notifications and the key row. It sits
 below the popover's fold (scroll the popover to reach it), and it is all in the reference below.
 
-### 7. Footer
+### 8. Footer
 
 One compact line: the version from the bundle (`0.1.0` for a local `make bundle`, `dev` for a bare binary),
 *"local-only"*, a **Quit** button, and the key-store line described above.
