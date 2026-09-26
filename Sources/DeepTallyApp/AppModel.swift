@@ -667,9 +667,10 @@ final class AppModel {
   /// One user-facing sentence for a failed transfer, from the cases a user can actually reach.
   ///
   /// Deliberately **not** exhaustive over `LedgerError` (AGENTS.md §9.14): an unknown case falls back
-  /// to a generic sentence instead of failing this target to compile, and no branch can echo a row's
-  /// contents — the messages carry a file name and, for a bad row, the line number and the parser's
-  /// own reason.
+  /// to a generic sentence instead of failing this target to compile. No branch can echo a key or any
+  /// prompt content — the CSV schema holds counters, model ids, a session id and a hash, never message
+  /// text — and a malformed row's sentence repeats the offending field's text, which comes from the file
+  /// the user chose, plus a line number and a file name reduced to its last component.
   private static func describeTransferFailure(_ error: Error) -> String {
     guard let ledgerError = error as? LedgerError else {
       return "The CSV transfer failed."
@@ -711,7 +712,7 @@ final class AppModel {
     MetricFormatting.cacheHitPercent(localUsage?.cacheHitRatio)
   }
 
-  /// The one line the settings panel shows while local usage needs a caveat: not being imported at
+  /// The one line the analytics section shows while local usage needs a caveat: not being imported at
   /// all, or being imported with some rows the price table cannot price. Quiet on purpose: neither a
   /// missing opencode database nor an unpriced model is something the user has to fix for the
   /// balance, the alerts or the rate panel to keep working.

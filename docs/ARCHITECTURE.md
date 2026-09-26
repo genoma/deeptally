@@ -21,10 +21,11 @@ The app target is `DeepTallyApp`, not `DeepTally`: SwiftPM product names must di
 case because APFS is case-insensitive, and `DeepTally` vs `deeptally` collided at link time. For the same
 reason the CLI target declares an explicit `path: Sources/DeepTallyCLI` ([`../AGENTS.md`](../AGENTS.md) §9.10).
 
-Current status (after Step 4): `DeepTallyCore` carries the ledger, the incremental import flow and the
-reprice repair; `DeepTallyApp` imports local usage and shows two ledger-backed menu-bar metrics beside the
-balance; the `deeptally` CLI has `usage`, `import`, `ledger export|prune|reprice` next to the Step 3
-commands. The analytics popover and CSV import are Step 5; what any of it does for a user is in
+Current status (after Step 5): `DeepTallyCore` carries the ledger, the incremental import flow, the reprice
+repair and the day-window reader over the `daily` rollups; `DeepTallyApp` imports local usage, shows two
+ledger-backed menu-bar metrics beside the balance and an analytics panel, and exports/imports the ledger as
+CSV; the `deeptally` CLI has `usage`, `import`, `ledger export|prune|reprice` next to the Step 3 commands,
+and takes `DEEPTALLY_LEDGER` to work on another ledger file. What any of it does for a user is in
 [`USAGE.md`](USAGE.md).
 
 ## Data flow

@@ -7,9 +7,8 @@ Everything it stores is on your Mac ([`PRIVACY.md`](PRIVACY.md)).
 ![The DeepTally popover](assets/popover.png)
 
 **Status: pre-alpha (development build `0.1.0`).** This page describes what the shipping code does after
-Step 4 — balance, menu bar, the local usage ledger and the CLI. The analytics popover and CSV import are
-Step 5 ([`PLAN.md`](PLAN.md) §5); where a feature does not exist yet, this page says so rather than
-describing an intention.
+Step 5 — balance, menu bar, the local usage ledger, the analytics popover, CSV import/export and the CLI.
+Where a feature does not exist yet, this page says so rather than describing an intention.
 
 ---
 

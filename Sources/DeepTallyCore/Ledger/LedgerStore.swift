@@ -963,10 +963,11 @@ public final class LedgerStore {
   /// has.
   ///
   /// ## The provider filter
-  /// `provider` narrows the rows both stores contribute — the raw aggregate and the `daily` rows. It
-  /// deliberately does **not** narrow the test that decides which store answers a day: that test asks
-  /// whether the day was pruned, and a prune removes the whole day whatever providers were in it, so a
-  /// filtered test could call an intact day unavailable.
+  /// `provider` narrows the rows both stores contribute — the raw aggregate and the `daily` rows — and a
+  /// day that contributes no rows for it is skipped rather than reported empty. It deliberately does
+  /// **not** narrow the test that decides which store answers a day: that test asks whether the day was
+  /// pruned, and a prune removes the whole day whatever providers were in it, so a filtered test could
+  /// call an intact day unavailable.
   ///
   /// ## What a rollup day cannot see
   /// `daily` has no `cache_write` column, so a day read from it reports `cacheWriteTokens == 0` and a
@@ -978,9 +979,13 @@ public final class LedgerStore {
   ///
   /// ## Day counts
   /// ``LedgerUsageWindow/rawDayCount`` plus ``LedgerUsageWindow/rollupDayCount`` plus
-  /// ``LedgerUsageWindow/unavailableDays`` account for every UTC day the range touches, except a day that
-  /// holds nothing in either store — with a `provider`, nothing for that provider. Those are counted
-  /// nowhere, deliberately. Days are walked oldest first, so ``LedgerUsageWindow/days`` and
+  /// ``LedgerUsageWindow/unavailableDays`` account for every UTC day the range touches, except a day with
+  /// no rows for this read: nothing in either store, or — with a `provider` — nothing for that provider.
+  /// Those are counted nowhere, deliberately: there is no usage to count, so nothing is missing. A raw day
+  /// whose rows all belong to other providers is not one of them, because the unfiltered existence test
+  /// sees the rows and the day is intact; the filtered read inside it returns no groups, so the day is
+  /// skipped (not sent to the rollup, which would hold the same whole day filtered to nothing) and lands
+  /// in no count. Days are walked oldest first, so ``LedgerUsageWindow/days`` and
   /// ``LedgerUsageWindow/unavailableDays`` are in date order, and the walk is by 86 400-second UTC days —
   /// a UTC day has no DST and no leap second in this store's arithmetic.
   public func usageWindow(
@@ -1021,12 +1026,18 @@ public final class LedgerStore {
         let groups = try rawDayGroups(
           rawRows, since: max(dayStart, rangeStart), until: min(dayEnd, rangeEnd),
           provider: provider)
-        days.append(
-          LedgerDayUsage(
-            date: date, dayStart: Date(timeIntervalSince1970: TimeInterval(dayStart)),
-            source: .rawRows, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
-        Self.merge(groups, into: &merged)
-        rawDayCount += 1
+        // With a `provider`, a day whose rows all belong to other providers is not an answer for this
+        // read: it contributes nothing and is not a day entry. Its rows are still what makes the day
+        // intact (the existence test above stays unfiltered), which is why the day is not sent to the
+        // rollup either — the rollup holds the same whole day, filtered to nothing.
+        if provider == nil || !groups.isEmpty {
+          days.append(
+            LedgerDayUsage(
+              date: date, dayStart: Date(timeIntervalSince1970: TimeInterval(dayStart)),
+              source: .rawRows, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
+          Self.merge(groups, into: &merged)
+          rawDayCount += 1
+        }
       } else {
         // No raw rows: `daily` is the only store that could answer for this day, and it answers only
         // when the range covers the day whole — a whole-day aggregate used for part of a day would

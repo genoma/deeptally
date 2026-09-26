@@ -5,9 +5,9 @@ import SwiftUI
 /// `deeptally` CLI wrote.
 ///
 /// Deliberately its own section rather than more rows inside `SettingsPanel`: it is about the
-/// ledger's data, it has its own progress state, and the settings panel already carries the quiet
-/// caveat line for local usage. The buttons only report taps — every path and every sentence comes
-/// from `AppModel`.
+/// ledger's data, it has its own progress state, and the analytics section above already carries the
+/// quiet caveat line for local usage. The buttons only report taps — every path and every sentence
+/// comes from `AppModel`.
 struct LedgerTransferSection: View {
   let isTransferring: Bool
   let message: String?

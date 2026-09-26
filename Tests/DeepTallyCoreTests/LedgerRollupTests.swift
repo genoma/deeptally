@@ -299,16 +299,14 @@ struct LedgerRollupTests {
     #expect(kilo.summary.requestCount == 2)
     #expect(kilo.summary.models.allSatisfy { $0.provider == .kilo })
 
-    // A provider neither store has rows for: nothing is reported as spend, and nothing is called
-    // unavailable. The day whose raw rows are intact is still *reported* — the store can answer for it,
-    // the filter merely finds nothing in it — while the pruned day, which only `daily` could answer for,
-    // has no rows for this provider and contributes nothing.
+    // A provider neither store has rows for: nothing is reported as spend, no day is reported empty, and
+    // nothing is called unavailable. The intact day is skipped rather than listed with an empty summary —
+    // "no answer for this provider" and "a day with no rows for this provider" are the same fact, and an
+    // empty day entry would make `days` look like usage.
     let openrouter = try fixture.store.usageWindow(since: day1, until: day3, provider: .openrouter)
-    #expect(openrouter.days.map(\.date) == ["2026-09-28"])
-    #expect(openrouter.days.map(\.source) == [.rawRows])
-    #expect(openrouter.days.allSatisfy { $0.summary == LedgerSummary(models: []) })
+    #expect(openrouter.days.isEmpty)
     #expect(openrouter.summary == LedgerSummary(models: []))
-    #expect(openrouter.rawDayCount == 1)
+    #expect(openrouter.rawDayCount == 0)
     #expect(openrouter.rollupDayCount == 0)
     #expect(openrouter.unavailableDays.isEmpty)
 

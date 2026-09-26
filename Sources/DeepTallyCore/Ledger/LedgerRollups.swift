@@ -56,7 +56,8 @@ public struct LedgerUsageWindow: Sendable, Equatable {
   /// usage to count, so nothing is missing from it. Empty when no such day is in range.
   ///
   /// ``rawDayCount``, ``rollupDayCount`` and this list account for every UTC day the range touches except
-  /// a day that holds nothing in either store — with a `provider`, nothing for that provider. Those are
-  /// counted nowhere, deliberately.
+  /// a day that holds nothing for this read: nothing in either store, or — with a `provider` — nothing
+  /// for that provider. Those are counted nowhere, deliberately: there is no usage to count, so nothing is
+  /// missing from them.
   public let unavailableDays: [String]
 }
