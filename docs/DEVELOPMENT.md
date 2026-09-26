@@ -12,8 +12,8 @@ contract; [`PLAN.md`](PLAN.md) is the step-by-step plan of record.
 | Swift 6.4 or later | `swift --version` |
 | Xcode | **not required and not used** — no `xcodebuild`, no `actool` |
 
-The project has **zero third-party dependencies** and no sandbox; it links system frameworks plus
-`libsqlite3` only. Don't add a package without a decision recorded in [`PLAN.md`](PLAN.md).
+The project has **zero third-party dependencies** and no sandbox; it links system frameworks only. Don't add
+a package without a decision recorded in [`PLAN.md`](PLAN.md).
 
 ## Make targets
 
@@ -50,22 +50,19 @@ four seconds later — then kills it again. It deliberately launches **without**
 missing key must not stop the app from starting".
 
 **`make screenshots`** renders the shipping views to `dist/popover.png`, `dist/popover-dark.png` and
-`dist/popover-settings.png` (the committed copies live in `docs/assets/`). Those come from the same binary,
-through the **real** composition root and the real key precedence:
+`dist/popover-settings.png` (the two popover copies are committed under `docs/assets/`). Those come from
+the same binary, through the **real** composition root and the real key precedence:
 
 ```sh
 make bundle
-dist/DeepTally.app/Contents/MacOS/DeepTally --spike render-popover dist/popover [height] \
-  [--ledger <path>] [--opencode <path>]
+dist/DeepTally.app/Contents/MacOS/DeepTally --spike render-popover dist/popover [height]
 ```
 
 The optional `height` defaults to 420 pt, the real popover size; pass a taller value to capture the part of
-the body that scrolls. `--ledger` and `--opencode` point the render at a throwaway store and database
-instead of the real ones, so a seeded metric can be rendered without writing into your own ledger — and the
-fail-soft path can be shown with a database that does not exist. The command waits for a settled state
-before drawing, because a persisted reading would otherwise bake a permanent *"Refreshing…"* into the
-screenshot. It needs a key (Keychain or `DEEPSEEK_API_KEY`) to show an amount — which makes a successful run
-a live check that the Keychain import works.
+the body that scrolls. The command waits for a settled state before drawing, because a persisted reading
+would otherwise bake a permanent *"Refreshing…"* into the screenshot. It needs a key (Keychain or
+`DEEPSEEK_API_KEY`) to show an amount — which makes a successful run a live check that the Keychain import
+works.
 
 Two traps, both learned the hard way (2026-09-24):
 
@@ -74,7 +71,7 @@ Two traps, both learned the hard way (2026-09-24):
    dark-on-nothing — white text on white. Every `writePNG` caller in `Spikes.swift` sets both.
 2. **Never write `#Preview`** in this repo. The macro expands through the `PreviewsMacros` plugin, which ships
    with Xcode; with Command Line Tools the build fails with *"external macro implementation type
-   'PreviewsMacros.SwiftUIView' could not be found"* ([`../AGENTS.md`](../AGENTS.md) §9.13). Use a
+   'PreviewsMacros.SwiftUIView' could not be found"* ([`../AGENTS.md`](../AGENTS.md) §9.12). Use a
    `PreviewProvider` struct instead — it still renders in Xcode's canvas. `@State` (a `SwiftUIMacros` macro)
    is unavailable to a CLT build for the same reason, which is why the previews use constant bindings.
 
@@ -85,16 +82,15 @@ any UI exists and are not part of the shipped app path.
 ## Tests
 
 Tests use **swift-testing** (`import Testing`, `@Suite`, `@Test`, `#expect`), not XCTest. Run them with
-`make test` or `swift test`. They must never touch the network and never open your real opencode database —
-inject clients, use fixture databases.
+`make test` or `swift test`. They must never touch the network — inject clients and seams.
 
 There are three test targets, and any single one is a `--filter` away:
 
 ```sh
 swift test                               # all three targets
-swift test --filter DeepTallyCoreTests   # core: ledger, pricing, importer, rate, settings, keychain
-swift test --filter DeepTallyCLITests    # the CLI: option parsers, local-day windows, usage report, reprice
-swift test --filter DeepTallyAppTests    # the app layer: AppModel, AppEnvironment, LocalUsageLedger
+swift test --filter DeepTallyCoreTests   # core: balance, pricing, rate, settings, keychain
+swift test --filter DeepTallyCLITests    # the CLI: exit codes and command behaviour
+swift test --filter DeepTallyAppTests    # the app layer: AppModel, LaunchStateStore, Uninstaller
 ```
 
 `--filter` matches `<test-target>.<test-case>`, so the target name alone selects the whole suite. The two
@@ -103,16 +99,8 @@ extraction — which is why the app's state owner and the CLI's command surface 
 
 **`swift build` does not compile test files.** It builds the products only, so a test that no longer compiles
 leaves `make build` green — and the same blind spot runs the other way: a green build is green for the
-targets it compiled, not for every target a change touches ([`../AGENTS.md`](../AGENTS.md) §9.14). Finish
-every change with `swift test` and read its real output.
-
-**Never commit a ledger.** The real one lives outside the repository
-(`~/Library/Application Support/DeepTally/ledger.sqlite`, plus `-wal`/`-shm` while it is open), and a CSV from
-`deeptally ledger export` carries session ids and dedupe hashes. Copying either into the tree — for a
-debugging session, a bug report or a fixture — puts real usage into git. If a test needs a ledger, let
-`LedgerStore(url:)` open one in a temporary directory; if it needs opencode rows, build a fixture database.
-`opencode.db` itself is never committed either. `.gitignore` covers `dist/` and `*.log` but not `*.sqlite` or
-`*.csv`, so check `git status` before you commit.
+targets it compiled, not for every target a change touches. Finish every change with `swift test` and read
+its real output.
 
 Two platform traps are already handled in the build, but you will meet them the moment you touch
 `Package.swift` or add a target:
@@ -137,13 +125,11 @@ search by default (Xcode installs it under `plugins/`). The test target passes
 - No `try!`, no force unwraps in `Sources/`, no `fatalError()` in shipped code paths. Use typed `enum`
   errors; keep user-facing strings separate from diagnostics.
 - UI runs on `@MainActor`; I/O lives in actors. Strict concurrency is on (Swift 6 language mode).
-- SQLite: WAL journal, `synchronous=NORMAL`, one connection, prepared statements, `raw_hash` unique for
-  dedupe.
 - Never print, log or commit secrets. The API key is masked as `sk-…1234` in any diagnostic; `launchctl
-  setenv` is forbidden.
+  setenv` is forbidden, and tests must not read a Keychain item they cannot restore.
 - Money is a JSON **string** everywhere (`Decimal.parse`), and every monetary value comes from data, never
   from Swift: prices and model IDs load from `Resources/PriceTable.json` ([`../AGENTS.md`](../AGENTS.md)
-  §9.11).
+  §9.10).
 
 ## Branches, commits, versions
 
@@ -163,7 +149,7 @@ MINOR version. The CHANGELOG ([`../CHANGELOG.md`](../CHANGELOG.md), Keep a Chang
 ## Where things live
 
 - [`USAGE.md`](USAGE.md) — the user's page: key import, the CLI, the popover and settings.
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — targets, composition root, data flow, ledger schema, rate-now math.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — targets, composition root, data flow, pricing and rate-now math.
 - [`PRIVACY.md`](PRIVACY.md) — hosts, stored data, deletion.
 - [`INSTALL.md`](INSTALL.md) / [`UNSIGNED.md`](UNSIGNED.md) — install paths and the signing trade-offs.
 - [`../SECURITY.md`](../SECURITY.md) — reporting and threat model.

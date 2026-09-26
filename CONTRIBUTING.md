@@ -26,8 +26,8 @@ changed; the body explains why when that is not obvious. Merge with `--no-ff`.
 - Every source file starts with `// SPDX-License-Identifier: GPL-3.0-or-later`.
 - No `try!`, no force unwraps in `Sources/`, no `fatalError()` in shipped paths. Typed errors; user-facing
   strings separate from diagnostics.
-- Tests never touch the network and never open the real opencode database — inject clients, use fixture
-  databases.
+- Tests never touch the network and never read a Keychain item they cannot restore — inject clients and
+  seams, use fixtures.
 - Zero third-party runtime dependencies. Propose a package before adding one; the default answer is no.
 
 ## Docs
