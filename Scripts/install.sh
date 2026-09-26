@@ -237,8 +237,16 @@ fi
 echo "==> mounting $DMG_NAME"
 MOUNT="$WORKDIR/mount"
 mkdir -p "$MOUNT"
-hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG_PATH" >/dev/null \
-  || fail "could not mount $DMG_NAME — the file may be incomplete; download it again and retry"
+# macOS 26 deprecated 'hdiutil attach' and prints a warning; 'diskutil image attach' is the
+# replacement but does not exist on macOS 15, which this project still supports. Prefer the new call
+# when the tool has it, fall back to hdiutil otherwise. Detach stays hdiutil: it works for both.
+if diskutil image attach --help >/dev/null 2>&1; then
+  diskutil image attach --mountOptions nobrowse --readOnly --mountPoint "$MOUNT" "$DMG_PATH" >/dev/null \
+    || fail "could not mount $DMG_NAME — the file may be incomplete; download it again and retry"
+else
+  hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT" "$DMG_PATH" >/dev/null \
+    || fail "could not mount $DMG_NAME — the file may be incomplete; download it again and retry"
+fi
 MOUNTED=1
 [ -d "$MOUNT/${APP_NAME}.app" ] || fail "$DMG_NAME does not contain ${APP_NAME}.app — refusing to install from it"
 
