@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Step 6 complete · Step 6.5 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
+**Status:** Step 6 complete · Steps 4, 5 and 6.5 **reverted by owner decision** (API-only) · Step 6.6 in progress · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -184,6 +184,10 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Lanes:** Wave A (keychain, settings, rate, balance) · Wave B (views, cli, integration, docs) · Wave C (review fixes: core, app, docs)
 
 ### Step 4 — Ledger, pricing, importer
+> **Reverted 2026-09-26 by the owner's API-only decision** (see Step 6.6 and [`COUNCIL-2026-09-26.md`](COUNCIL-2026-09-26.md)). The pricing engine, price table and holiday
+> calendar stay; the ledger, importer and every usage source are deleted. The checkboxes and evidence below are kept
+> as the record of what was built and why it went.
+
 **Status:** complete — acceptance-reviewed 2026-09-24/25 (all findings closed; see the note below)
 - [x] `LedgerStore` over the system `libsqlite3` with schema versioning from v1, `INSERT OR IGNORE` dedupe on `raw_hash`, UTC-keyed daily rollups, pruning, CSV round-trip *(lane LEDGER — 16 tests; money is INTEGER micro-USD because this project refuses Double for money; the store is deliberately not `Sendable`, which the compiler enforces)*
 - [x] Importer extended with an incremental `since:` watermark, and `LedgerSync` as the one flow the CLI and the app share *(the ledger owns the watermark, because the ledger is what knows which rows committed)*
@@ -227,6 +231,9 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     intends. The menu bar shows a stale reading until the Mac is awake and the key resolves again.
 
 ### Step 5 — Analytics popover + exports
+> **Reverted 2026-09-26 by the owner's API-only decision** (see Step 6.6). The analytics popover, CSV import/export
+> and the rollup reader are deleted; the API alone cannot supply their data.
+
 **Status:** complete — acceptance-reviewed 2026-09-26 (findings below)
 - [x] Menu bar metric modes (balance / today $ / cache %), thresholds — landed with Step 4's ledger
 - [x] Popover analytics: today/7d/30d spend, cache-hit %, per-model breakdown, cache trend — the panel and
@@ -331,7 +338,11 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   human (this machine is the only one available)
 
 ### Step 6.5 — API-level usage capture (loopback proxy) ✱
-**Status:** in progress — pulled forward from v1.1 at the user's direction on 2026-09-26
+> **Reverted 2026-09-26 by the owner's API-only decision** (see Step 6.6). The proxy was the only harness-agnostic
+> capture point and it worked; the owner chose an API-only product instead, so it is deleted rather than shipped
+> off by default.
+
+**Status:** complete — then reverted on 2026-09-26
 
 > **Why this step exists.** The popover showed `$0.00` today while the user was actively spending DeepSeek
 > credits through the pi agent. The only local source was opencode's database, which has nothing since
@@ -380,6 +391,29 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     client: leave opencode on its direct connection, point unimportable clients (pi, scripts) at the proxy.
   - **Not recoverable:** calls made before the proxy was enabled. There is no usage endpoint to backfill
     from; the balance is the only signal for them.
+
+### Step 6.6 — API-only simplification (owner decision 2026-09-26)
+**Status:** in progress
+
+> **Decision (owner, 2026-09-26):** DeepTally is an API-only application. Its product is *how much money is left*,
+> with the rates that explain what a request would cost. Everything that needs local capture is deleted: the ledger
+> (schema, rollups, migrations), the opencode importer, the loopback proxy and its reader, the analytics panel,
+> CSV import/export, reprice and the unpriced-row machinery, the `usage` / `import` / `ledger` CLI commands, and
+> `DEEPTALLY_LEDGER`. The council memo ([`COUNCIL-2026-09-26.md`](COUNCIL-2026-09-26.md)) records why: DeepSeek
+> returns usage only per response, to the caller, and stores nothing queryable; the balance is the only
+> account-level number.
+
+- [ ] Delete every usage source and its wiring: core `Ledger/`, `Import/`, `Proxy/`, the app's local-usage ledger,
+      analytics, proxy server/upstream, transfer panels, and the CLI's `usage` / `import` / `ledger` commands
+- [ ] Simplify settings to what remains: refresh cadence, low-balance threshold, notifications and cooldown, login
+      item; a menu bar that always shows the balance
+- [ ] Keep and verify the API-only surface: `balance` (app and CLI), the rate-now panel and price table, the key
+      commands, alerts, settings, uninstaller, install/release machinery
+- [ ] Rewrite the docs around the smaller product (`README`, `USAGE`, `PRIVACY`, `ARCHITECTURE`, `AGENTS`,
+      `DEVELOPMENT`, `RELEASING`, `INSTALL`, `CHANGELOG`)
+  **Gate:** `make verify` green on the reduced test suite; the popover renders balance and rate with no usage
+  section; `deeptally balance` and `deeptally rate` work and an unknown `usage` command fails cleanly; no source or
+  doc reference to a deleted feature remains.
 
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
@@ -451,6 +485,7 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | Model id resolution | **aliases as data** in the price table, four documented rules, case-sensitive, `nil` for anything unrecognised so it can be reported as unpriced rather than priced wrongly |
 | A partly covered UTC day (Step 5) | **named as unavailable only when `daily` holds rows for it**; a day with nothing in either store contributes nothing and is not listed — a note about a day with no usage would read as missing data |
 | New JSON keys (Step 5) | **snake_case** (`rollup_days`, `unavailable_days`), like every other multiword key in the `usage` document |
+| API-only product (2026-09-26) | **Balance, rates, key and settings only.** Everything that needs local capture is deleted: the ledger, the opencode importer, the loopback proxy, the analytics panel, CSV import/export, reprice, the `usage`/`import`/`ledger` CLI commands and `DEEPTALLY_LEDGER`. Rationale and evidence: [`COUNCIL-2026-09-26.md`](COUNCIL-2026-09-26.md) |
 | Pointing the CLI at another ledger (Step 5) | **`DEEPTALLY_LEDGER=<path>`**: `HOME` does not redirect application support, so this is the one safe way to try `ledger prune`/`ledger reprice` on a copy. It exists because a gate script of mine got this wrong and pruned the real ledger (see the log) |
 | Release tamper-protection (Step 6) | **Immutable Releases enabled** on the repository (`PUT /immutable-releases`, verified `enabled: true`): a published tag and its assets cannot be edited or deleted, so a bad release gets the next patch version, never a re-upload |
 | Uninstaller ownership (Step 6) | **The Swift `Uninstaller` owns the removal list**; `Scripts/uninstall.sh` execs `DeepTally --uninstall`, so the popover button and the script cannot drift. `--keep-login-item`/`--keep-keychain` exist so the release gate never touches the machine that runs it |
@@ -493,3 +528,4 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 6.5 | Reader merged (`2994455`): `ProxyUsageReader` for JSON bodies and SSE streams, chunk-safe and bounded memory, 11 tests. A live capture proved the usage chunk arrives even without `stream_options.include_usage` (so the proxy never rewrites a request) and gave the exact token mapping: the API's `completion_tokens` **includes** reasoning, which the ledger stores separately and bills as output. |
 | 2026-09-26 | 6.5 | App server and docs merged (`f00ffe9`, `68df0ba`): NWListener with origin-form-only forwarding and explicit 400/501/502 refusals, settings toggle (off by default) plus port stepper, one ledger row per completion with `source: .proxy`, headless `--spike proxy`. 396 tests. **Live gate passed:** a streaming and a non-streaming completion with the real key landed two rows (`input 37 · output 0 · reasoning 4 · cache_read 0 · 8 µUSD` each, exactly the responses' own numbers), `deeptally usage --json` reported spend `0.000016` with 2 requests, and `lsof` showed `127.0.0.1` only. Docs lane flagged the gap the parent then documented: **no cross-source dedupe** — a client that is both imported and proxied double counts, so the rule is one path per client (opencode stays on its import; pi and scripts use the proxy). |
 | 2026-09-26 | 6.5 | Independent read-only review of the proxy: **no P0/P1**, seven P2s all closed — request-side hop-by-hop headers per RFC 7230 §6.1, a 32-connection cap and a 30-second idle-read timeout, 400 instead of 502 for an unparseable target, second-rounded id-less dedupe, a stale caption on a port change, and two documentation mismatches. The reviewer's weakest assumption (`Accept-Encoding: identity` with the header dropped) was verified against the live API; the gate gained loopback-only and refusal assertions (absolute-form → 400, chunked → 501). 396 tests, gate re-run green. |
+| 2026-09-26 | 6.6 | **Owner decision after the council: API-only.** DeepSeek exposes no usage or spend endpoint; per-call usage is handed to the caller and never stored, so no API-only history exists. The app keeps balance, rates, key handling, alerts, settings and the release machinery; the ledger, opencode importer, loopback proxy, analytics, CSV, reprice and the usage/import/ledger commands are deleted. Reverts Steps 4, 5 and 6.5 by decision, not by failure. |
