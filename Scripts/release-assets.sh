@@ -71,6 +71,22 @@ if [ "$reported" != "$VERSION" ]; then
   fail "the staged $CLI_NAME reports '$reported', not '$VERSION' — refusing to publish $TARBALL"
 fi
 
+# Homebrew installs the binary and its bundle in libexec behind a bin wrapper (the formula cannot use a
+# symlink: SwiftPM's resource accessor does not resolve one). Prove that layout here, where it is a gate
+# — v0.1.1's formula crashed in it after publishing.
+BREW_SIM="$(mktemp -d)"
+mkdir -p "$BREW_SIM/libexec" "$BREW_SIM/bin"
+cp "$STAGE/$CLI_NAME" "$BREW_SIM/libexec/$CLI_NAME"
+cp -R "$STAGE/$CORE_BUNDLE" "$BREW_SIM/libexec/$CORE_BUNDLE"
+printf '#!/bin/bash\nexec "%s" "$@"\n' "$BREW_SIM/libexec/$CLI_NAME" > "$BREW_SIM/bin/$CLI_NAME"
+chmod +x "$BREW_SIM/bin/$CLI_NAME"
+brew_reported="$("$BREW_SIM/bin/$CLI_NAME" --version | awk '{ print $2 }')"
+rm -rf "$BREW_SIM"
+if [ "$brew_reported" != "$VERSION" ]; then
+  rm -rf "$STAGE"
+  fail "the CLI cannot find its resources behind a Homebrew-style wrapper (reported '$brew_reported') — refusing to publish $TARBALL"
+fi
+
 # COPYFILE_DISABLE keeps ._* AppleDouble entries out of the archive (BSDTar would add them).
 COPYFILE_DISABLE=1 tar -czf "$TARBALL" -C "$STAGE" "$CLI_NAME" "$CORE_BUNDLE"
 rm -rf "$STAGE"
@@ -105,7 +121,10 @@ class Deeptally < Formula
 
   def install
     libexec.install "$CLI_NAME", "$CORE_BUNDLE"
-    bin.install_symlink libexec/"$CLI_NAME"
+    # A wrapper, not a symlink: SwiftPM's generated resource accessor looks for the bundle beside the
+    # path the process was started with and does not resolve symlinks, so a bin symlink hides the
+    # libexec bundle (v0.1.1's formula crashed with a Fatal error because of this).
+    (bin/"$CLI_NAME").write_env_script libexec/"$CLI_NAME", {}
   end
 
   test do
