@@ -34,10 +34,8 @@ struct SettingsTests {
     let settings = AppSettings.default
     #expect(settings.refreshIntervalMinutes == 20)
     #expect(settings.lowBalanceThreshold == 2)
-    #expect(settings.menuBarMetric == .balance)
     #expect(settings.notificationsEnabled)
     #expect(settings.notificationCooldownMinutes == 720)
-    #expect(!settings.showSecondaryMetric)
   }
 
   @Test("a fresh store loads AppSettings.default")
@@ -79,10 +77,8 @@ struct SettingsTests {
       let settings = AppSettings(
         refreshIntervalMinutes: 90,
         lowBalanceThreshold: Decimal.parse("12.75"),
-        menuBarMetric: .todaySpend,
         notificationsEnabled: false,
-        notificationCooldownMinutes: 1_440,
-        showSecondaryMetric: true
+        notificationCooldownMinutes: 1_440
       )
 
       store.save(settings)
@@ -120,17 +116,23 @@ struct SettingsTests {
     }
   }
 
-  @Test("an unknown menu bar metric falls back to balance")
-  func unknownMenuBarMetricFallsBackToBalance() {
+  @Test("a stored blob that still carries the removed usage keys decodes")
+  func removedUsageKeysAreIgnored() {
     withIsolatedDefaults { defaults in
+      // Written by a build that still had the menu bar metric and the usage proxy: the keys are
+      // unknown now, so they are ignored and every remaining field still loads.
       defaults.set(
-        Data(#"{"menuBarMetric": "tokyoDrift", "showSecondaryMetric": true}"#.utf8),
+        Data(
+          #"{"menuBarMetric": "tokyoDrift", "showSecondaryMetric": true, "proxyEnabled": true, "proxyPort": 9090, "refreshIntervalMinutes": 60, "notificationsEnabled": false}"#
+            .utf8),
         forKey: settingsKey)
 
       let loaded = SettingsStore(defaults: defaults).load()
 
-      #expect(loaded.menuBarMetric == .balance)
-      #expect(loaded.showSecondaryMetric)
+      #expect(
+        loaded
+          == AppSettings(
+            refreshIntervalMinutes: 60, notificationsEnabled: false))
     }
   }
 
@@ -138,13 +140,13 @@ struct SettingsTests {
   func wrongTypeResetsOnlyThatField() {
     withIsolatedDefaults { defaults in
       defaults.set(
-        Data(#"{"refreshIntervalMinutes": "soon", "showSecondaryMetric": true}"#.utf8),
+        Data(#"{"refreshIntervalMinutes": "soon", "notificationsEnabled": false}"#.utf8),
         forKey: settingsKey)
 
       let loaded = SettingsStore(defaults: defaults).load()
 
       #expect(loaded.refreshIntervalMinutes == 20)
-      #expect(loaded.showSecondaryMetric)
+      #expect(!loaded.notificationsEnabled)
     }
   }
 
@@ -217,7 +219,11 @@ struct SettingsTests {
       }
 
       #expect(object["lowBalanceThreshold"] as? String == "12.75")
-      #expect(object["menuBarMetric"] as? String == "balance")
+      // The removed menu-bar metric and proxy keys are gone, so nothing writes them any more.
+      #expect(object["menuBarMetric"] == nil)
+      #expect(object["showSecondaryMetric"] == nil)
+      #expect(object["proxyEnabled"] == nil)
+      #expect(object["proxyPort"] == nil)
       // The Currency setting is gone, so nothing writes a currency key any more.
       #expect(object["currencyCode"] == nil)
     }

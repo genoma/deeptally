@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-/// Minimal DeepSeek HTTP client. Only balance and models live here; usage parsing lives in
-/// `UsageParsing.swift` (lane API) and the ledger in Step 4.
+/// Minimal DeepSeek HTTP client. Only the balance and the model list live here; the app records no
+/// per-call usage, because the API stores none.
 public struct DeepSeekClient: Sendable {
   public enum APIError: Swift.Error, Sendable, Equatable {
     case missingAPIKey

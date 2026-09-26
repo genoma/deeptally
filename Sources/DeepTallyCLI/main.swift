@@ -4,4 +4,4 @@ import Foundation
 
 // The commands live in Commands.swift; this file is only the process entry point, so the CLI has
 // exactly one `exit`.
-exit(await CLI.run(Array(CommandLine.arguments.dropFirst()), ledgerURL: CLI.resolvedLedgerURL()))
+exit(await CLI.run(Array(CommandLine.arguments.dropFirst())))

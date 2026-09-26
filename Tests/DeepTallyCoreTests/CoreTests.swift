@@ -32,48 +32,6 @@ struct BalanceDecodingTests {
   }
 }
 
-@Suite("Token usage")
-struct TokenUsageTests {
-  @Test("cache ratio uses hit + miss as the denominator")
-  func cacheRatio() throws {
-    let usage = TokenUsage(
-      promptTokens: 1_000,
-      completionTokens: 200,
-      cacheHitTokens: 750,
-      cacheMissTokens: 250
-    )
-    #expect(usage.totalTokens == 1_200)
-    #expect(usage.cacheHitRatio == 0.75)
-  }
-
-  @Test("cache ratio is nil when there are no prompt tokens")
-  func cacheRatioWithoutPromptTokens() {
-    let usage = TokenUsage(
-      promptTokens: 0, completionTokens: 10, cacheHitTokens: 0, cacheMissTokens: 0)
-    #expect(usage.cacheHitRatio == nil)
-  }
-
-  @Test("decodes DeepSeek's nested reasoning tokens")
-  func decodesReasoningTokens() throws {
-    let json = #"""
-      {
-        "prompt_tokens": 5,
-        "completion_tokens": 9,
-        "total_tokens": 14,
-        "prompt_cache_hit_tokens": 4,
-        "prompt_cache_miss_tokens": 1,
-        "completion_tokens_details": { "reasoning_tokens": 6 }
-      }
-      """#
-
-    let usage = try JSONDecoder().decode(TokenUsage.self, from: Data(json.utf8))
-
-    #expect(usage.reasoningTokens == 6)
-    #expect(usage.cacheHitTokens == 4)
-    #expect(usage.cacheMissTokens == 1)
-  }
-}
-
 @Suite("Price table")
 struct PriceTableTests {
   @Test("loads the shipped placeholder without crashing")

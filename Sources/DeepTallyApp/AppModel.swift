@@ -8,21 +8,19 @@ import Observation
 /// The integrator: one object that owns the key, the polling schedule, the derived balance state, the
 /// rate-now display, the settings and the notices the popover shows.
 ///
-/// Four rules this type exists to keep:
+/// Three rules this type exists to keep:
 /// - a refresh never runs twice at once, and the next one always comes from `PollingPlan`
 ///   (interval, then backoff, then jitter) rather than from a hand-rolled timer chain;
-/// - nothing blocking runs on the main actor: importing a key and every ledger pass are the two
-///   blocking kinds of work in the app and both run off it (the ledger lives in ``LocalUsageLedger``);
+/// - nothing blocking runs on the main actor: importing a key is the one blocking kind of work in
+///   the app and it runs off it;
 /// - the API key leaves the Keychain only as the `Bearer` argument of one request. It is never
 ///   logged, never written to `UserDefaults`, and never displayed (AGENTS.md §5);
 /// - a low-balance alert is remembered as delivered only after macOS accepted it, so a denial or a
 ///   failed post is retried instead of consuming the cooldown; while macOS will not deliver alerts,
 ///   the menu bar carries the warning glyph and the popover says so once.
 ///
-/// Local usage is imported for the same reason the balance is polled: the numbers have to be live
-/// without the user doing anything. It is a separate, fixed cadence, it never touches the balance
-/// path, and every failure of it is quiet — at most the settings panel says local usage is not being
-/// imported yet.
+/// The app is API-only: the balance comes from `/user/balance`, the rate panel from the local price
+/// table, and per-call usage is never captured (see docs/COUNCIL-2026-09-26.md).
 @MainActor
 @Observable
 final class AppModel {
@@ -49,22 +47,6 @@ final class AppModel {
   private(set) var isImportingKey = false
   private(set) var importMessage: String?
   private(set) var loginItemStatus: LoginItem.Status = .notRegistered
-  /// The last good reading of the ledger, or `nil` until a pass has successfully read it.
-  private(set) var localUsage: LocalUsageMetrics?
-  /// The analytics panel's numbers from the same pass as ``localUsage``. A failed pass leaves the
-  /// last good value in place, exactly as it does for the menu bar metrics.
-  private(set) var localUsageAnalytics: LocalUsageAnalytics?
-  /// Why the last ledger pass could not import, or `nil` when it did. Rendered only as the quiet
-  /// note in ``localUsageNote``; a missing opencode database is never a banner.
-  private(set) var localUsageProblem: String?
-  /// One calm sentence from the last pass about rows the price table cannot price, or `nil` when
-  /// every offered row had a price. Not a failure: the metrics still carry the priced rows' values.
-  private(set) var localUsagePricingNote: String?
-  /// `true` while a CSV export or import is in flight. One flag for both, because both write through
-  /// the same ledger connection and the buttons must not queue a second transfer behind the first.
-  private(set) var isTransferringLedger = false
-  /// The last transfer's report or failure, one sentence, or `nil` before any transfer ran.
-  private(set) var ledgerTransferMessage: String?
   /// The last uninstall's report, or `nil` before one ran. `isComplete` is what the view answers
   /// with: a complete report means the app is in the Trash and this process should quit.
   private(set) var uninstallReport: Uninstaller.Report?
@@ -92,29 +74,6 @@ final class AppModel {
   /// The uninstaller behind *Uninstall DeepTally…*, with the app's login item and Keychain item.
   /// See ``Uninstaller``.
   private let uninstaller: Uninstaller
-  /// The one owner of the ledger. Injected so the app-layer tests can hand in a source they drive
-  /// instead of the developer's opencode database; see ``LocalUsageLedger``.
-  private let localUsageLedger: LocalUsageLedger
-  /// The loopback usage proxy, or `nil` while it has never been enabled.
-  ///
-  /// Built lazily, on the first enable, so the recorder it is given can capture this model; nothing
-  /// binds a socket while the setting is off, and a test injects its own here.
-  private var proxy: (any UsageProxyServing)?
-  /// Bumped by every reconcile of the setting, so a start that finishes late cannot overwrite the
-  /// outcome of a newer one.
-  private var proxyGeneration = 0
-  /// The port the listener actually bound, or `nil` while the proxy is off or could not bind.
-  private(set) var proxyBoundPort: Int?
-  /// The one line that says the listener could not start, or `nil`. Never an error dump: the listener
-  /// reports a phrase and the banner carries it. The rest of the app is unaffected either way.
-  private(set) var proxyProblem: String?
-  /// The calendar every local day boundary is computed with; see ``AppEnvironment/calendar``.
-  private let calendar: Calendar
-  /// The currency the ledger prices in, for the spend metric. The table's, never the account's.
-  private let ledgerCurrency: String
-  /// `true` while a ledger pass is running, so a trigger that arrives mid-pass is skipped rather than
-  /// queued: the fifteen-minute tick must not join a launch scan of a large database.
-  private(set) var isLocalUsageRefreshing = false
   /// Injection seam: the wall clock. The app reads `Date()`; a test moves it, so "stale after an
   /// hour" and "the cooldown has elapsed" are assertions rather than waits.
   private let now: @MainActor () -> Date
@@ -154,8 +113,6 @@ final class AppModel {
     loginItem: LoginItemControl = .system,
     now: @escaping @MainActor () -> Date = { Date() },
     jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
-    localUsageLedger: LocalUsageLedger? = nil,
-    usageProxy: (any UsageProxyServing)? = nil,
     uninstaller: Uninstaller? = nil
   ) {
     self.environment = environment
@@ -164,13 +121,9 @@ final class AppModel {
     self.loginItem = loginItem
     self.now = now
     self.jitterFraction = jitterFraction
-    self.localUsageLedger = localUsageLedger ?? environment.makeLocalUsageLedger()
-    self.proxy = usageProxy
     self.uninstaller =
       uninstaller
       ?? Uninstaller.shipping(loginItem: loginItem, keychain: environment.keychain)
-    self.calendar = environment.calendar
-    self.ledgerCurrency = environment.priceTable.currency
     let settings = environment.settingsStore.load()
     self.settings = settings
     self.monitor = environment.balanceMonitor(lowBalanceThreshold: settings.lowBalanceThreshold)
@@ -198,8 +151,6 @@ final class AppModel {
       installNetworkObserver()
     }
     startTicker()
-    startLocalUsage()
-    updateProxy()
     if settings.notificationsEnabled {
       Task { await requestNotificationPermission() }
     }
@@ -211,9 +162,6 @@ final class AppModel {
     scheduling.cancel()
     wakeTask?.cancel()
     pathMonitor.cancel()
-    // Best effort: the socket would go with the process anyway, but cancelling the listener also
-    // releases the port for the next launch, and a connection mid-response gets to finish writing.
-    if let proxy { Task { await proxy.stop() } }
   }
 
   // MARK: - Balance
@@ -269,8 +217,8 @@ final class AppModel {
     if next != balanceState { balanceState = next }
   }
 
-  /// One successful reading: in memory, on disk and in the derived state. `UserDefaults`, not the
-  /// ledger: this is display state, and losing it only costs an "as of" line on the next launch.
+  /// One successful reading: in memory, on disk and in the derived state. `UserDefaults`, not a local
+  /// store: this is display state, and losing it only costs an "as of" line on the next launch.
   private func record(balance: Balance) {
     let fetchedAt = now()
     latestBalance = balance
@@ -572,238 +520,8 @@ final class AppModel {
       cooldownMinutes: validated.notificationCooldownMinutes)
     evaluate()
     scheduleNextRefresh()
-    // A metric the ledger backs must not wait for the next import tick to get its first number.
-    if validated.menuBarMetric != .balance, localUsage == nil {
-      refreshLocalUsage()
-    }
     if validated.notificationsEnabled, !previous.notificationsEnabled {
       Task { await requestNotificationPermission() }
-    }
-    // The listener follows the toggle and the port: started on the first enable, restarted on a new
-    // port, stopped when the toggle goes off.
-    if validated.proxyEnabled != previous.proxyEnabled || validated.proxyPort != previous.proxyPort
-    {
-      updateProxy()
-    }
-  }
-
-  /// The ledger pass, once at launch and every fifteen minutes after it. A separate, fixed cadence:
-  /// it is a local file read, and "why did my spend not update?" is worse than a number that lags by
-  /// a few minutes. It runs even while the balance metric is selected, so switching metric never
-  /// waits for the next tick.
-  private func startLocalUsage() {
-    scheduling.startLedgerTicker(every: Self.localUsageIntervalSeconds) { [weak self] in
-      self?.refreshLocalUsage()
-    }
-    refreshLocalUsage()
-  }
-
-  /// Runs one import-and-query pass. The SQLite work belongs to ``LocalUsageLedger``'s actor, so
-  /// nothing here can block the UI; the main actor only records what came back.
-  ///
-  /// A pass is skipped while one is already in flight, so the fifteen-minute tick cannot join a
-  /// launch scan that is still reading the opencode database.
-  func refreshLocalUsage() {
-    guard !isLocalUsageRefreshing else { return }
-    isLocalUsageRefreshing = true
-    let now = self.now()
-    let calendar = self.calendar
-    let ledger = localUsageLedger
-    Task { [weak self] in
-      let outcome = await ledger.refresh(now: now, calendar: calendar)
-      guard let self else { return }
-      self.isLocalUsageRefreshing = false
-      self.localUsageProblem = outcome.importProblem
-      self.localUsagePricingNote = outcome.pricingNote
-      // The actor returns the last good analytics when a read fails, so this cannot blank the panel.
-      self.localUsageAnalytics = outcome.analytics
-      // A failed pass keeps the last good numbers: blanking them would turn a transient unreadable
-      // file into "you spent nothing".
-      if let metrics = outcome.metrics { self.localUsage = metrics }
-    }
-  }
-
-  /// The currency the ledger's amounts were priced in, for the analytics panel. The table's, never
-  /// the account's: a spend figure is never converted (docs/PLAN.md §1).
-  var ledgerCurrencyCode: String { ledgerCurrency }
-
-  // MARK: - Local usage proxy
-
-  /// The settings caption: the address clients are pointed at, with the port the listener actually
-  /// bound. `nil` while the proxy is off or could not start — the banner says why in that case.
-  var proxyCaption: String? {
-    guard settings.proxyEnabled, let port = proxyBoundPort else { return nil }
-    return "Point clients at http://127.0.0.1:\(port) — usage is recorded from each API response."
-  }
-
-  /// Reconciles the listener with the settings. One line and no crash when the port is taken, and
-  /// nothing else in the app waits on the answer.
-  private func updateProxy() {
-    proxyGeneration += 1
-    let generation = proxyGeneration
-    guard settings.proxyEnabled else {
-      // The caption and the problem line are about a listener that is running; the toggle going off
-      // clears both at once rather than leaving them until the cancellation lands.
-      proxyBoundPort = nil
-      proxyProblem = nil
-      if let proxy { Task { await proxy.stop() } }
-      return
-    }
-
-    let port = settings.proxyPort
-    let server = proxy ?? makeProxyServer()
-    proxy = server
-    proxyProblem = nil
-    // A port change rebinds: the old port is closed until the new bind lands, so the caption must not
-    // keep naming it (it would contradict the listener that is actually in service).
-    proxyBoundPort = nil
-    Task { [weak self] in
-      let outcome = await server.start(port: port)
-      guard let self, generation == self.proxyGeneration else { return }
-      switch outcome {
-      case .listening(let boundPort):
-        self.proxyBoundPort = boundPort
-        self.proxyProblem = nil
-      case .notListening(let reason):
-        self.proxyBoundPort = nil
-        self.proxyProblem = "The local usage proxy could not start: \(reason)."
-      }
-    }
-  }
-
-  /// The server the app ships, with the recorder pointed at the ledger actor.
-  private func makeProxyServer() -> any UsageProxyServing {
-    environment.makeUsageProxyServer(recording: { [weak self] usage in
-      await self?.recordProxyUsage(usage)
-    })
-  }
-
-  /// One proxied response: the ledger prices and stores it, then hands back the metrics it changed,
-  /// which are applied here without a second ledger pass. Recorded rows are the only thing the proxy
-  /// ever writes; a response the reader found no usage in never reaches this. A ledger that cannot be
-  /// written changes nothing on screen here — the next import pass reports it in its own quiet note,
-  /// and a proxied request is not a reason to blank a number that was true a moment ago.
-  private func recordProxyUsage(_ usage: ProxyUsage) async {
-    let outcome = await localUsageLedger.record(usage, now: now(), calendar: calendar)
-    if let metrics = outcome.metrics { localUsage = metrics }
-    if let analytics = outcome.analytics { localUsageAnalytics = analytics }
-  }
-
-  // MARK: - CSV transfer
-
-  /// Opens a save panel and writes the ledger as CSV. Choosing a destination is the modal step; the
-  /// write itself runs on the ledger's actor.
-  func exportLedger() {
-    guard !isTransferringLedger else { return }
-    let name = LedgerPanels.suggestedExportName(now: now())
-    guard let url = LedgerPanels.chooseExportURL(suggestedName: name) else { return }
-    exportLedger(to: url)
-  }
-
-  /// The testable half of the export: a path the caller chose, so the file and the sentence can be
-  /// asserted without a modal panel.
-  func exportLedger(to url: URL) {
-    guard !isTransferringLedger else { return }
-    isTransferringLedger = true
-    ledgerTransferMessage = nil
-    Task { [weak self] in
-      guard let self else { return }
-      await self.performExport(to: url)
-    }
-  }
-
-  /// *Export CSV First…* in the uninstall alert: the ledger is written to a path the user picks, and
-  /// only then does the uninstall continue. `true` means the file is on disk and the caller may
-  /// remove the ledger.
-  ///
-  /// A cancelled save panel cancels the uninstall, and so does a failed export: continuing would
-  /// delete the very ledger the user just asked to keep.
-  func exportLedgerThenUninstall() async -> Bool {
-    guard !isTransferringLedger else { return false }
-    let name = LedgerPanels.suggestedExportName(now: now())
-    guard let url = LedgerPanels.chooseExportURL(suggestedName: name) else { return false }
-    isTransferringLedger = true
-    ledgerTransferMessage = nil
-    return await performExport(to: url)
-  }
-
-  /// One export and the sentence it leaves behind, on the main actor. Both entry points end here, so
-  /// the flag and the message can never disagree about whether a transfer is running.
-  @discardableResult
-  private func performExport(to url: URL) async -> Bool {
-    let ledger = localUsageLedger
-    do {
-      let outcome = try await ledger.exportCSV(to: url)
-      isTransferringLedger = false
-      ledgerTransferMessage =
-        "Exported \(Self.rowCount(outcome.rows)) to \(url.lastPathComponent)."
-      return true
-    } catch {
-      isTransferringLedger = false
-      ledgerTransferMessage = Self.describeTransferFailure(error)
-      return false
-    }
-  }
-
-  /// Opens an open panel and imports the file it returns.
-  func importLedger() {
-    guard !isTransferringLedger else { return }
-    guard let url = LedgerPanels.chooseImportURL() else { return }
-    importLedger(from: url)
-  }
-
-  /// The testable half of the import. A successful import re-reads the metrics and the unpriced
-  /// note, so a file full of rows the price table cannot price shows the same quiet caveat an
-  /// opencode import would set — not a second, different notice.
-  func importLedger(from url: URL) {
-    guard !isTransferringLedger else { return }
-    isTransferringLedger = true
-    ledgerTransferMessage = nil
-    let ledger = localUsageLedger
-    Task { [weak self] in
-      do {
-        let outcome = try await ledger.importCSV(from: url)
-        guard let self else { return }
-        self.isTransferringLedger = false
-        self.ledgerTransferMessage =
-          outcome.rows == 0
-          ? "Imported nothing new from \(url.lastPathComponent); every row was already stored."
-          : "Imported \(Self.rowCount(outcome.rows)) from \(url.lastPathComponent)."
-        self.refreshLocalUsage()
-      } catch {
-        guard let self else { return }
-        self.isTransferringLedger = false
-        self.ledgerTransferMessage = Self.describeTransferFailure(error)
-      }
-    }
-  }
-
-  /// `2 rows`, `1 row`, `0 rows` — the count and the noun together, so no caller can pluralise one
-  /// without the other.
-  private static func rowCount(_ rows: Int) -> String {
-    "\(MetricFormatting.groupedCount(rows)) \(rows == 1 ? "row" : "rows")"
-  }
-
-  /// One user-facing sentence for a failed transfer, from the cases a user can actually reach.
-  ///
-  /// Deliberately **not** exhaustive over `LedgerError` (AGENTS.md §9.14): an unknown case falls back
-  /// to a generic sentence instead of failing this target to compile. No branch can echo a key or any
-  /// prompt content — the CSV schema holds counters, model ids, a session id and a hash, never message
-  /// text — and a malformed row's sentence repeats the offending field's text, which comes from the file
-  /// the user chose, plus a line number and a file name reduced to its last component.
-  private static func describeTransferFailure(_ error: Error) -> String {
-    guard let ledgerError = error as? LedgerError else {
-      return "The CSV transfer failed."
-    }
-    switch ledgerError {
-    case .fileMissing(let path), .unreadableFile(let path, _):
-      return "Could not read \(URL(fileURLWithPath: path).lastPathComponent)."
-    case .cannotWrite(let path, _):
-      return "Could not write \(URL(fileURLWithPath: path).lastPathComponent)."
-    case .malformedCSV(let line, let reason):
-      return "That CSV cannot be imported: \(reason) (line \(line))."
-    default:
-      return "The CSV transfer failed."
     }
   }
 
@@ -815,48 +533,15 @@ final class AppModel {
 
   /// Removes DeepTally: the popover calls this after the user confirmed, and the alert reports
   /// `uninstallReport` afterwards.
-  ///
-  /// Nothing runs while a CSV transfer is in flight: both the ledger connection and the popover's
-  /// button treat that as one operation, and removing the ledger under a running export would
-  /// produce a half-written file.
   func uninstall() {
-    guard !isTransferringLedger else { return }
     uninstallReport = uninstaller.run()
   }
 
   // MARK: - Menu bar
 
-  /// The menu bar title. Every mode has a number behind it: the balance comes from the API, the other
-  /// two from the ledger. A number the app does not have is never shown — an em dash is honest, a
-  /// fabricated zero is not.
-  var menuBarLabel: String {
-    switch settings.menuBarMetric {
-    case .balance: return balanceState?.amountText ?? "—"
-    case .todaySpend: return todaySpendText ?? "—"
-    case .cacheHitRate: return cacheHitRateText
-    }
-  }
-
-  /// Today's spend over the current local day, formatted the way the balance is. `nil` until a read of
-  /// the ledger has succeeded, since a failed pass has no business claiming `$0.00`.
-  var todaySpendText: String? {
-    localUsage.map { MetricFormatting.spend($0.todaySpendUSD, currency: ledgerCurrency) }
-  }
-
-  /// Cache hits over prompt tokens for the trailing 30 days; an em dash when the window recorded no
-  /// prompt tokens (or none at all yet).
-  var cacheHitRateText: String {
-    MetricFormatting.cacheHitPercent(localUsage?.cacheHitRatio)
-  }
-
-  /// The one line the analytics section shows while local usage needs a caveat: not being imported at
-  /// all, or being imported with some rows the price table cannot price. Quiet on purpose: neither a
-  /// missing opencode database nor an unpriced model is something the user has to fix for the
-  /// balance, the alerts or the rate panel to keep working.
-  var localUsageNote: String? {
-    if localUsageProblem != nil { return "Local usage is not being imported yet." }
-    return localUsagePricingNote
-  }
+  /// The menu bar title, which is always the account balance. A number the app does not have is
+  /// never shown — an em dash is honest, a fabricated zero is not.
+  var menuBarLabel: String { balanceState?.amountText ?? "—" }
 
   /// Everything the status item's button shows, derived in one place so the menu bar and
   /// `--spike render-popover` cannot disagree — and so the low-balance fallback is provable without
@@ -943,12 +628,6 @@ final class AppModel {
     if let loginItemError {
       banners.append(Banner(id: "login-item", kind: .error, message: loginItemError))
     }
-    if let proxyProblem {
-      // A listener that could not start is a warning and not an error: the balance, the ledger and
-      // the alerts are all unaffected, and the fix — another port, or stopping whatever holds it — is
-      // in the settings panel right below.
-      banners.append(Banner(id: "usage-proxy", kind: .warning, message: proxyProblem))
-    }
     return banners
   }
 
@@ -991,9 +670,6 @@ final class AppModel {
   /// The countdown is rendered in whole minutes, so half a minute is the smallest tick that can
   /// change it.
   private static let tickerSeconds = 30
-  /// How often local usage is imported: at launch, then every fifteen minutes. Fixed, not a setting —
-  /// it is a local file read, and the point is that the metrics are live without user action.
-  static let localUsageIntervalSeconds: TimeInterval = 15 * 60
   /// `PollingPlan` doubles the wait per attempt and caps it; this keeps the counter small enough that
   /// the exponent cannot run away.
   private static let maximumBackoffAttempt = 8

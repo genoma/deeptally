@@ -75,14 +75,14 @@ struct UninstallerTests {
 
   // MARK: - The flags
 
-  @Test("--keep-data keeps the ledger and the logs, and still removes preferences and caches")
-  func keepDataKeepsTheLedger() throws {
+  @Test("--keep-data keeps the app data directory, and still removes preferences and caches")
+  func keepDataKeepsAppData() throws {
     let scenery = try UninstallScenery()
     defer { scenery.removeAll() }
 
     let report = makeUninstaller(scenery, keepsData: true).run()
 
-    #expect(FileManager.default.fileExists(atPath: scenery.ledger.path))
+    #expect(FileManager.default.fileExists(atPath: scenery.oldDataFile.path))
     #expect(
       FileManager.default.fileExists(atPath: scenery.appSupport.appending(path: "launch.log").path))
     #expect(!FileManager.default.fileExists(atPath: scenery.preferences.path))
@@ -358,7 +358,7 @@ struct UninstallerTests {
 
       // What the confirmation alert would list.
       #expect(fixture.model.uninstallPlanText.contains(scenery.bundle.path))
-      #expect(fixture.model.uninstallPlanText.contains("Export CSV First…"))
+      #expect(!fixture.model.uninstallPlanText.contains("Export"))
 
       fixture.model.uninstall()
 
@@ -368,31 +368,6 @@ struct UninstallerTests {
       #expect(keychain.deletes == 1)
       #expect(!FileManager.default.fileExists(atPath: scenery.appSupport.path))
       #expect(!FileManager.default.fileExists(atPath: scenery.bundle.path))
-    }
-  }
-
-  @Test("the model removes nothing while a CSV transfer is in flight")
-  func modelWaitsForTheTransfer() async throws {
-    try await withIsolatedDefaults(Self.domain) { defaults in
-      let scenery = try UninstallScenery()
-      defer { scenery.removeAll() }
-      let fixture = makeFixture(
-        defaults: defaults, uninstaller: makeUninstaller(scenery))
-      let url = scenery.root.appending(path: "usage.csv")
-
-      fixture.model.exportLedger(to: url)
-      // The flag flips synchronously, so the click that follows cannot start a removal.
-      #expect(fixture.model.isTransferringLedger)
-      fixture.model.uninstall()
-      #expect(fixture.model.uninstallReport == nil)
-
-      await waitUntil("the export to finish") { !fixture.model.isTransferringLedger }
-      #expect(FileManager.default.fileExists(atPath: scenery.appSupport.path))
-
-      // And once the transfer is over the removal runs as usual.
-      fixture.model.uninstall()
-      #expect(fixture.model.uninstallReport?.isComplete == true)
-      #expect(!FileManager.default.fileExists(atPath: scenery.appSupport.path))
     }
   }
 
@@ -439,12 +414,14 @@ struct UninstallScenery {
   let bundle: URL
   let trash: URL
   let appSupport: URL
-  let ledger: URL
+  /// One file an older install may have left inside ``appSupport``, so `--keep-data` has something
+  /// to prove it still keeps.
+  let oldDataFile: URL
   let preferences: URL
   let caches: URL
   let savedState: URL
-  /// The paths the plan removes: the app-support directory (which holds the ledger, its side files
-  /// and the Step 2 logs), the preferences plist, the caches, the saved state and the bundle.
+  /// The paths the plan removes: the app-support directory (an older install may have left files
+  /// there), the preferences plist, the caches, the saved state and the bundle.
   let removedItems: [URL]
   /// One unrelated sibling next to each removed item, at every level of the tree.
   let siblings: [URL]
@@ -461,7 +438,7 @@ struct UninstallScenery {
     trash = root.appending(path: "Trash", directoryHint: .isDirectory)
     appSupport = home.appending(
       path: "Library/Application Support/DeepTally", directoryHint: .isDirectory)
-    ledger = appSupport.appending(path: "ledger.sqlite")
+    oldDataFile = appSupport.appending(path: "ledger.sqlite")
     preferences =
       home
       .appending(path: "Library/Preferences", directoryHint: .isDirectory)
@@ -485,8 +462,8 @@ struct UninstallScenery {
       root.appending(path: "Applications/Other.app/Contents/Info.plist"),
     ]
 
-    // Every item the plan removes, in the shape macOS would leave it: the ledger with its two side
-    // files, the Step 2 logs and marker, a plist, two directories with content inside.
+    // Every item the plan removes, in the shape macOS would leave it: an app-data directory holding
+    // a few files an older install may have written, a plist, two directories with content inside.
     try manager.createDirectory(at: appSupport, withIntermediateDirectories: true)
     for name in ["ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "launch.log"] {
       try Data("x".utf8).write(to: appSupport.appending(path: name))

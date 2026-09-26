@@ -21,19 +21,6 @@ struct PopoverView: View {
         Divider()
         RateNowPanel(display: model.rateNow)
         Divider()
-        LocalUsageSection(
-          analytics: model.localUsageAnalytics,
-          currency: model.ledgerCurrencyCode,
-          isRefreshing: model.isLocalUsageRefreshing,
-          note: model.localUsageNote,
-          onRefresh: { model.refreshLocalUsage() })
-        Divider()
-        LedgerTransferSection(
-          isTransferring: model.isTransferringLedger,
-          message: model.ledgerTransferMessage,
-          onExport: { model.exportLedger() },
-          onImport: { model.importLedger() })
-        Divider()
         startupSection
         Divider()
         settingsSection
@@ -108,7 +95,6 @@ struct PopoverView: View {
       isImportingKey: model.isImportingKey,
       importMessage: model.importMessage,
       alertsUnavailable: model.alertsUnavailable,
-      proxyCaption: model.proxyCaption,
       onImportFromShell: { model.importKey(from: $0) },
       onDeleteKey: { model.deleteKey() }
     )
@@ -139,11 +125,8 @@ struct PopoverView: View {
         Button("Uninstall DeepTally…") { confirmUninstall() }
           .buttonStyle(.link)
           .font(.caption2)
-          .disabled(model.isTransferringLedger)
           .help(
-            model.isTransferringLedger
-              ? "A CSV transfer is in progress; the ledger cannot be removed until it finishes."
-              : "Remove DeepTally, its ledger, its caches, its preferences and the Keychain item."
+            "Remove DeepTally, its app data, its caches, its preferences and the Keychain item."
           )
       }
     }
@@ -153,28 +136,16 @@ struct PopoverView: View {
 
   /// The confirmation, and the only place the popover decides anything about the removal: the alert
   /// lists what the uninstaller would remove, and the model does the work.
-  ///
-  /// *Export CSV First…* writes the ledger where the user chooses and then continues with the
-  /// uninstall, which is the whole point of offering it here: the ledger is the one file that cannot
-  /// be recreated later.
   private func confirmUninstall() {
     let alert = NSAlert()
     alert.alertStyle = .warning
     alert.messageText = "Uninstall DeepTally?"
     alert.informativeText = model.uninstallPlanText
     alert.addButton(withTitle: "Uninstall")
-    alert.addButton(withTitle: "Export CSV First…")
     alert.addButton(withTitle: "Cancel")
     switch alert.runModal() {
     case .alertFirstButtonReturn:
       uninstallAndReport()
-    case .alertSecondButtonReturn:
-      // The export runs in the model's own task, so the continuation is a task too; a cancelled
-      // save panel or a failed write ends here, with the ledger still in place.
-      Task { @MainActor in
-        guard await model.exportLedgerThenUninstall() else { return }
-        uninstallAndReport()
-      }
     default:
       break
     }

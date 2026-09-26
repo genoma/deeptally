@@ -12,8 +12,7 @@ import Synchronization
 ///
 /// 1. the login item, unregistered through ``LoginItemControl`` (`SMAppService`);
 /// 2. the API key, through ``KeychainStore``;
-/// 3. `~/Library/Application Support/DeepTally` — the ledger with its `-wal`/`-shm` side files and the
-///    Step 2 spike logs and marker;
+/// 3. `~/Library/Application Support/DeepTally` — the app's data directory, removed whole;
 /// 4. the preferences domain `io.github.genoma.deeptally`;
 /// 5. `~/Library/Caches/io.github.genoma.deeptally`;
 /// 6. `~/Library/Saved Application State/io.github.genoma.deeptally.savedState`, when macOS wrote one;
@@ -24,7 +23,7 @@ import Synchronization
 /// the shipping choices, while a test runs the whole plan against throwaway paths and never touches
 /// the real Trash, Keychain or login item.
 ///
-/// A step that fails does not stop the others. A locked Keychain item must not leave the ledger
+/// A step that fails does not stop the others. A locked Keychain item must not leave the app data
 /// behind, and the report names what could not be done so the exit code is not the only signal.
 @MainActor
 struct Uninstaller {
@@ -44,7 +43,7 @@ struct Uninstaller {
     /// `--trash-dir`: where the bundle goes. `nil` means the user's real Trash, through
     /// ``Uninstaller/moveToTrash(_:into:)``.
     var trashDirectory: URL?
-    /// `--keep-data`: keep the ledger and the Step 2 logs, remove everything else.
+    /// `--keep-data`: keep `~/Library/Application Support/DeepTally`, remove everything else.
     var keepsData = false
     /// `--keep-keychain`: keep the API key.
     var keepsKeychain = false
@@ -192,9 +191,8 @@ struct Uninstaller {
     }
   }
 
-  /// The ledger, its side files and the Step 2 logs, in one directory — so one removal covers
-  /// `ledger.sqlite`, `ledger.sqlite-wal`, `ledger.sqlite-shm`, `launch.log`, `last-launch.json` and
-  /// the `spike-enabled` marker without naming any of them.
+  /// The app data directory, removed whole: an older install may have left a ledger, its side files
+  /// and the Step 2 logs there, and one removal covers all of it without naming any of them.
   private func appDataLine(performing: Bool) -> Report.Line {
     let url = appDataURL
     guard !options.keepsData else {
@@ -300,7 +298,7 @@ struct Uninstaller {
     options.home.appending(path: "Library/Application Support", directoryHint: .isDirectory)
   }
 
-  /// Everything the app owns under Application Support: the ledger and the Step 2 spike logs.
+  /// Everything the app owns under Application Support.
   private var appDataURL: URL {
     applicationSupportURL.appending(path: "DeepTally", directoryHint: .isDirectory)
   }
@@ -473,8 +471,7 @@ extension Uninstaller {
       }
       let closing =
         kept.isEmpty
-        ? "Nothing is kept. Export CSV First… writes a copy of the ledger where you choose, before "
-          + "anything is removed."
+        ? "Nothing is kept."
         : "Kept as requested: \(kept.map(\.name).joined(separator: ", "))."
       return (bullets + ["", closing]).joined(separator: "\n")
     }

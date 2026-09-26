@@ -6,10 +6,10 @@ import Testing
 
 // MARK: - Fixtures
 
-/// The ids the real opencode ledger used that had no row of their own, and the row each one must
-/// price as. Three are plain ids and three sit behind the `deepseek/` route prefix, which the
-/// resolver strips — the prefixes are therefore deliberately absent from `PriceTable.json`.
-private let observedLedgerIDs:
+/// The ids seen in the wild that had no row of their own, and the row each one must price as. Three
+/// are plain ids and three sit behind the `deepseek/` route prefix, which the resolver strips — the
+/// prefixes are therefore deliberately absent from `PriceTable.json`.
+private let observedModelIDs:
   [(id: String, model: String, hit: String, miss: String, output: String)] =
     [
       ("deepseek/deepseek-v4-flash-vision-exp", "deepseek-flash", "0.006", "0.30", "1.20"),
@@ -76,7 +76,7 @@ struct ModelAliasResolutionTests {
 
   @Test("each observed id resolves to its row with the shipped prices")
   func observedIDsResolve() throws {
-    for expected in observedLedgerIDs {
+    for expected in observedModelIDs {
       let price = try #require(table.price(forModel: expected.id), "no price for \(expected.id)")
       #expect(price.model == expected.model, "\(expected.id) resolved to \(price.model)")
       #expect(
@@ -123,7 +123,7 @@ struct ModelAliasResolutionTests {
       "deepseek/deepseek-v9",
       "deepseek/",
       "",
-      // Case matters: an id is only ever matched as the ledger spells it.
+      // Case matters: an id is only ever matched as a client spells it.
       "DEEPSEEK-V4-FLASH",
       "DeepSeek-V4-Flash",
       "deepseek-v4-flash-vision-exp-2027",
@@ -240,7 +240,7 @@ struct AliasDecodingValidationTests {
     #expect(sentence.contains("more than one model"))
   }
 
-  @Test("a user override can add an alias that prices a ledger id")
+  @Test("a user override can add an alias that prices a client-reported id")
   func overrideAliasPrices() throws {
     let home = try makeTemporaryHome()
     defer { try? FileManager.default.removeItem(at: home) }
@@ -264,40 +264,30 @@ struct AliasDecodingValidationTests {
   }
 }
 
-// MARK: - Cost
+// MARK: - Rates
 
-@Suite("Aliased ids are billed")
-struct AliasedCostTests {
-  /// 1M cache hit + 1M cache miss + 1M output at peak, the fixture prices from `PricingTests`.
-  private var millionOfEach: TokenUsage {
-    TokenUsage(
-      promptTokens: 2_000_000,
-      completionTokens: 1_000_000,
-      cacheHitTokens: 1_000_000,
-      cacheMissTokens: 1_000_000
-    )
-  }
-
-  @Test("a route-prefixed aliased id bills the flash rate, not zero")
-  func prefixedAliasIsBilled() {
+@Suite("Aliased ids resolve to a rate")
+struct AliasedRateTests {
+  @Test("a route-prefixed aliased id resolves to the flash rate")
+  func prefixedAliasResolves() {
     let engine = CostEngine(table: aliasTable())
 
-    let cost = engine.cost(
-      model: "deepseek/deepseek-v4-flash", usage: millionOfEach, at: peakInstant())
+    let rate = engine.currentRates(model: "deepseek/deepseek-v4-flash", at: peakInstant())
 
-    #expect(cost == Decimal.parse("1.506"))
-    #expect(cost != .zero)
+    #expect(rate.cacheHit == Decimal.parse("0.006"))
+    #expect(rate.cacheMiss == Decimal.parse("0.30"))
+    #expect(rate.output == Decimal.parse("1.20"))
   }
 
-  @Test("an alias bills exactly what its row bills")
+  @Test("an alias resolves exactly what its row resolves")
   func aliasMatchesRowPrice() {
     let engine = CostEngine(table: aliasTable())
+    let row = engine.currentRates(model: "deepseek-flash", at: peakInstant())
 
     for id in ["deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731"] {
       #expect(
-        engine.cost(model: id, usage: millionOfEach, at: peakInstant())
-          == engine.cost(model: "deepseek-flash", usage: millionOfEach, at: peakInstant()),
-        "\(id) must bill like deepseek-flash")
+        engine.currentRates(model: id, at: peakInstant()) == row,
+        "\(id) must resolve like deepseek-flash")
     }
   }
 }
@@ -306,11 +296,11 @@ struct AliasedCostTests {
 
 @Suite("Shipped price table aliases")
 struct ShippedAliasDataTests {
-  @Test("the shipped table resolves every id observed in the real ledger")
+  @Test("the shipped table resolves every id observed in the wild")
   func shippedTableResolvesObservedIDs() throws {
     let table = try PriceTableLoader().loadBundled()
 
-    for expected in observedLedgerIDs {
+    for expected in observedModelIDs {
       let price = try #require(table.price(forModel: expected.id), "no price for \(expected.id)")
       #expect(price.model == expected.model, "\(expected.id) resolved to \(price.model)")
       #expect(
@@ -321,9 +311,9 @@ struct ShippedAliasDataTests {
     }
   }
 
-  /// A data test, so dropping an alias in a future edit fails here instead of silently turning real
-  /// ledger rows back into $0.00.
-  @Test("the shipped alias lists are exactly the ones the ledger needed")
+  /// A data test, so dropping an alias in a future edit fails here instead of silently unpricing an
+  /// id a client reports.
+  @Test("the shipped alias lists are exactly the ones seen in the wild")
   func shippedAliasLists() throws {
     let table = try PriceTableLoader().loadBundled()
 
