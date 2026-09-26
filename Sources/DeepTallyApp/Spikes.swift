@@ -30,6 +30,7 @@ enum Spikes {
     case "login-item-unregister": printJSON(unregisterLoginItem())
     case "notifications": requestNotifications()
     case "render-popover": renderPopover(arguments.dropFirst())
+    case "proxy": runProxySpike(arguments.dropFirst())
     case "simulate-wake": simulateWake()
     default: printJSON(["error": "unknown spike command"])
     }
@@ -156,6 +157,7 @@ enum Spikes {
       isImportingKey: false,
       importMessage: nil,
       alertsUnavailable: model.alertsUnavailable,
+      proxyCaption: model.proxyCaption,
       onImportFromShell: { _ in },
       onDeleteKey: {}
     )
@@ -166,6 +168,68 @@ enum Spikes {
           .background(Color(white: 0.97))),
       size: NSSize(width: 320, height: 620),
       to: URL(fileURLWithPath: basePath + "-settings.png"))
+    exit(0)
+  }
+
+  // MARK: - The usage proxy
+
+  /// The Step 6.5 spike: the real proxy in the foreground, against the real ledger and the real
+  /// upstream. A spike, not a user feature — the shipping path is the settings toggle, and this is
+  /// what the release gate drives.
+  ///
+  ///   --spike proxy [port] [--ledger PATH]
+  ///
+  /// Defaults to port 8787 and the standard ledger. It prints one JSON line with the port the
+  /// listener actually bound — pass 0 to ask for an ephemeral one — and then runs until it is killed.
+  /// It needs no API key of its own: the client's own `Authorization` header is what travels
+  /// upstream, and the ledger records only counters, model and response id.
+  @MainActor
+  private static func runProxySpike(_ arguments: ArraySlice<String>) -> Never {
+    var port = 8787
+    var ledgerPath = LedgerStore.standardURL.path
+    var rest = arguments
+    if let first = rest.first, !first.hasPrefix("--") {
+      port = Int(first) ?? port
+      rest = rest.dropFirst()
+    }
+    while let flag = rest.first {
+      rest = rest.dropFirst()
+      switch flag {
+      case "--ledger":
+        if let path = rest.first {
+          ledgerPath = path
+          rest = rest.dropFirst()
+        }
+      default:
+        break
+      }
+    }
+
+    let ledgerURL = URL(fileURLWithPath: ledgerPath)
+    let environment = AppEnvironment(ledgerURL: ledgerURL)
+    let ledger = environment.makeLocalUsageLedger()
+    let calendar = environment.calendar
+    let server = environment.makeUsageProxyServer(recording: { usage in
+      // The ledger the app itself writes to, priced the same way: this spike exists to prove the
+      // shipping path rather than a parallel one.
+      _ = await ledger.record(usage, now: Date(), calendar: calendar)
+    })
+    Task {
+      switch await server.start(port: port) {
+      case .listening(let boundPort):
+        printJSON([
+          "command": "proxy",
+          "port": boundPort,
+          "ledger": ledgerURL.path,
+          "upstream": URLSessionProxyUpstream.baseURL.absoluteString,
+        ])
+      case .notListening(let reason):
+        printJSON(["command": "proxy", "error": reason, "ledger": ledgerURL.path])
+        exit(3)
+      }
+    }
+    // The listener is this process's foreground work: it stays up until it is killed.
+    RunLoop.main.run()
     exit(0)
   }
 
@@ -384,5 +448,8 @@ enum Spikes {
       return
     }
     print(line)
+    // Flushed, not merely printed: `--spike proxy` keeps running after its one line, and a caller
+    // reading the port out of a pipe would otherwise wait for a buffer that never fills.
+    fflush(stdout)
   }
 }

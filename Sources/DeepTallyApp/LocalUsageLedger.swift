@@ -147,6 +147,101 @@ actor LocalUsageLedger {
     }
   }
 
+  /// What one ``record(_:now:calendar:)`` did.
+  struct ProxyRecordOutcome: Sendable, Equatable {
+    enum Disposition: Sendable, Equatable {
+      /// The ledger stored the row.
+      case recorded
+      /// The ledger already held a row under this response's key: nothing was written.
+      case duplicate
+      /// There is no usable price table, so the row was not stored — see ``record(_:now:calendar:)``.
+      case skippedNoPriceTable
+      /// The ledger could not be written. The response still reached the client; this row is lost.
+      case failed
+    }
+
+    let disposition: Disposition
+    /// Today's spend and the trailing cache-hit rate as they read right after the write, or `nil`
+    /// when nothing was written or the read failed. Carried here rather than fetched by a second call
+    /// so a proxied request shows up in the menu bar without waiting for the fifteen-minute tick.
+    let metrics: LocalUsageMetrics?
+    /// The analytics panel's numbers from the same re-read, or `nil` for the same reasons.
+    let analytics: LocalUsageAnalytics?
+  }
+
+  /// Records one proxied response.
+  ///
+  /// Priced by the same engine every other row is priced with, at the response's own instant, so a
+  /// proxy row and an imported row for the same instant cannot disagree about the rate. The row is
+  /// keyed on the response id, so a client that repeats a response — a retry that returns the same
+  /// body, a duplicated stream — adds one row and not two; a body with no id falls back to the
+  /// response's instant, model and counters.
+  ///
+  /// **With no price table nothing is recorded.** An unreadable table prices every model at zero and
+  /// a row's cost travels with it forever, so a stored row would be a permanent $0 — the same reason
+  /// ``refresh(now:calendar:)`` imports nothing without a table. Dropping the row costs this one
+  /// request's counters; writing a cost that is wrong would corrupt the spend. A model the *table*
+  /// cannot price is a different case and is stored at zero, exactly as the importer stores it, and
+  /// ``ledgerPricingNote(_:)`` names it on the next pass.
+  ///
+  /// The menu-bar metrics and the analytics panel are re-read in the same call after a successful
+  /// insert, so a recorded response is visible without waiting for the next import tick.
+  func record(_ usage: ProxyUsage, now: Date, calendar: Calendar) -> ProxyRecordOutcome {
+    guard let costing else {
+      return ProxyRecordOutcome(disposition: .skippedNoPriceTable, metrics: nil, analytics: nil)
+    }
+    let ledger: LedgerStore
+    do {
+      ledger = try openLedger()
+    } catch {
+      return ProxyRecordOutcome(disposition: .failed, metrics: nil, analytics: nil)
+    }
+
+    let record = UsageRecord(
+      timestamp: usage.recordedAt,
+      source: .proxy,
+      provider: .deepseek,
+      model: usage.model,
+      usage: usage.usage,
+      // `costIfPriced` answers `nil` for a model the table does not list, and the row is stored at zero
+      // rather than dropped: the ledger's own unpriced scan reports it, and a reprice repairs it once
+      // the table knows the model.
+      costUSD: costing.costIfPriced(model: usage.model, usage: usage.usage, at: usage.recordedAt)
+        ?? .zero
+    )
+
+    do {
+      let inserted = try ledger.insert([(record: record, rawHash: Self.rawHash(for: usage))])
+      let readings = try? Self.readUsage(from: ledger, now: now, calendar: calendar)
+      if let readings {
+        lastMetrics = readings.metrics
+        lastAnalytics = readings.analytics
+      }
+      return ProxyRecordOutcome(
+        disposition: inserted > 0 ? .recorded : .duplicate,
+        metrics: readings?.metrics, analytics: readings?.analytics)
+    } catch {
+      return ProxyRecordOutcome(disposition: .failed, metrics: nil, analytics: nil)
+    }
+  }
+
+  /// The ledger's dedupe key for one proxied response: the source plus the response id. A body with
+  /// no id — the API sends one, but the reader tolerates one without — falls back to the response's
+  /// instant, model and counters, which is what makes a repeated identical response one row.
+  ///
+  /// The unit separator is the importer's convention for joining the parts of a key, and `raw_hash`
+  /// is UNIQUE in the ledger, so this is the whole of the duplication policy.
+  static func rawHash(for usage: ProxyUsage) -> String {
+    let identity =
+      usage.responseID
+      ?? [
+        "\(usage.recordedAt.timeIntervalSince1970)", usage.model,
+        "\(usage.usage.promptTokens):\(usage.usage.completionTokens)",
+        "\(usage.usage.cacheHitTokens):\(usage.usage.cacheMissTokens):\(usage.usage.reasoningTokens)",
+      ].joined(separator: "\u{1F}")
+    return "\(UsageSource.proxy.rawValue)\u{1F}\(identity)"
+  }
+
   /// What one import did: why the ledger got nothing new, and which of the rows it did get the price
   /// table cannot price.
   private struct ImportReport {

@@ -16,6 +16,9 @@ struct SettingsPanel: View {
   /// Alerts are switched on but macOS reports them denied: the one calm line that says so, and what
   /// carries a low balance instead.
   private let alertsUnavailable: Bool
+  /// The address clients should be pointed at, with the port the proxy actually bound, or `nil` while
+  /// the proxy is off or could not start. Built by the model, because only it knows the bound port.
+  private let proxyCaption: String?
   private let onImportFromShell: (ShellKind) -> Void
   private let onDeleteKey: () -> Void
 
@@ -24,6 +27,7 @@ struct SettingsPanel: View {
     isImportingKey: Bool,
     importMessage: String?,
     alertsUnavailable: Bool = false,
+    proxyCaption: String?,
     onImportFromShell: @escaping (ShellKind) -> Void,
     onDeleteKey: @escaping () -> Void
   ) {
@@ -31,6 +35,7 @@ struct SettingsPanel: View {
     self.isImportingKey = isImportingKey
     self.importMessage = importMessage
     self.alertsUnavailable = alertsUnavailable
+    self.proxyCaption = proxyCaption
     self.onImportFromShell = onImportFromShell
     self.onDeleteKey = onDeleteKey
   }
@@ -56,6 +61,14 @@ struct SettingsPanel: View {
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("Low-balance alerts cannot be delivered")
+        }
+      }
+
+      VStack(alignment: .leading, spacing: 8) {
+        proxyRow
+        if settings.proxyEnabled {
+          proxyPortRow
+          proxyCaptionLine
         }
       }
 
@@ -177,6 +190,51 @@ struct SettingsPanel: View {
     return rest == 0 ? "\(hours)h" : "\(hours)h \(rest)m"
   }
 
+  // MARK: - Local usage proxy
+
+  /// The listener toggle. Off by default, and off after every update: this is the only part of the
+  /// app that accepts a connection, so it is never on unless the user turned it on (AGENTS.md §1).
+  private var proxyRow: some View {
+    labeledRow("Local usage proxy") {
+      Toggle("", isOn: $settings.proxyEnabled)
+        .labelsHidden()
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .accessibilityLabel("Run the local usage proxy")
+        .help(
+          "Point an OpenAI-compatible client at the address below and its usage is recorded in the "
+            + "local ledger."
+        )
+    }
+  }
+
+  private var proxyPortRow: some View {
+    labeledRow("Port") {
+      HStack(spacing: 6) {
+        Text("\(settings.proxyPort)")
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(.secondary)
+        Stepper("", value: $settings.proxyPort, in: AppSettings.proxyPortRange)
+          .labelsHidden()
+          .controlSize(.small)
+          .accessibilityLabel("Local usage proxy port")
+      }
+    }
+  }
+
+  /// The caption carries the address with the port the listener actually bound — and it is absent
+  /// until it has bound, because an address no listener is answering at is worse than none. A bind
+  /// failure has its own line in the banner stack above.
+  @ViewBuilder private var proxyCaptionLine: some View {
+    if let proxyCaption {
+      Text(proxyCaption)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel("Local usage proxy address")
+    }
+  }
+
   // MARK: - API key
 
   private var keyRow: some View {
@@ -237,6 +295,16 @@ struct SettingsPanel: View {
 // — expanding it there fails with "plugin for module 'PreviewsMacros' not found". Do not rewrite
 // these as `#Preview` unless that plugin becomes available.
 struct SettingsPanelPreviews: PreviewProvider {
+  /// The second panel shows the proxy on, so the canvas carries the port and the caption too.
+  private static var proxyEnabled: AppSettings {
+    var settings = AppSettings.default
+    settings.proxyEnabled = true
+    return settings
+  }
+
+  private static let proxyCaption =
+    "Point clients at http://127.0.0.1:8787 — usage is recorded from each API response."
+
   /// A constant binding: previews cannot hold `@State` here either — that is a `SwiftUIMacros`
   /// plugin macro, unavailable to a Command Line Tools build just like `#Preview`. The controls are
   /// therefore inert in the canvas; the real binding comes from the app.
@@ -246,15 +314,17 @@ struct SettingsPanelPreviews: PreviewProvider {
         settings: .constant(AppSettings.default),
         isImportingKey: false,
         importMessage: "Imported a key from zsh.",
+        proxyCaption: nil,
         onImportFromShell: { _ in },
         onDeleteKey: {}
       )
       Divider()
       SettingsPanel(
-        settings: .constant(AppSettings.default),
+        settings: .constant(Self.proxyEnabled),
         isImportingKey: false,
         importMessage: nil,
         alertsUnavailable: true,
+        proxyCaption: Self.proxyCaption,
         onImportFromShell: { _ in },
         onDeleteKey: {}
       )
