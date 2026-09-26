@@ -125,7 +125,7 @@ struct UsageReportTests {
     #expect((root["models"] as? [Any])?.isEmpty == true)
   }
 
-  @Test("every window carries its rollup day count and the days it could not answer for")
+  @Test("every window carries its rollup day count and the dates the rollup cannot slice")
   func rollupKeys() throws {
     let summary = LedgerSummary(models: [
       model(spend: "0.421300", input: 200, output: 50, cacheRead: 800, requests: 3)
@@ -136,10 +136,13 @@ struct UsageReportTests {
     let root = try jsonObject(report.jsonText())
 
     let windows = try #require(root["windows"] as? [[String: Any]])
-    #expect(windows.allSatisfy { $0["rollupDays"] as? Int == 2 })
-    #expect(windows.allSatisfy { $0["unavailableDays"] as? [String] == ["2026-08-01"] })
-    #expect((root["selected"] as? [String: Any])?["rollupDays"] as? Int == 2)
-    #expect((root["selected"] as? [String: Any])?["unavailableDays"] as? [String] == ["2026-08-01"])
+    #expect(windows.allSatisfy { $0["rollup_days"] as? Int == 2 })
+    #expect(windows.allSatisfy { $0["unavailable_days"] as? [String] == ["2026-08-01"] })
+    #expect((root["selected"] as? [String: Any])?["rollup_days"] as? Int == 2)
+    #expect(
+      (root["selected"] as? [String: Any])?["unavailable_days"] as? [String] == ["2026-08-01"])
+    // The key style is the document's: every multiword key is snake_case.
+    #expect(windows.allSatisfy { $0["rollupDays"] == nil && $0["unavailableDays"] == nil })
     // Every existing key keeps its name and its value.
     #expect(windows[0]["key"] as? String == "today")
     #expect(windows[0]["from"] as? String == "2025-08-24T00:00:00+02:00")

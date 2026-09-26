@@ -949,11 +949,12 @@ public final class LedgerStore {
   /// ## Which store answers for a day
   /// A UTC day with at least one `request` row **anywhere** in it is intact: a prune deletes whole UTC
   /// days and never leaves one half-aggregated, so the day is answered from `request`, aggregating the
-  /// rows that fall inside the range. Otherwise, when the range covers the whole day, `daily` answers
-  /// for it. A day the range only partly covers is never read from `daily` — a whole-day aggregate used
-  /// for part of a day would over-count — so it is named in ``LedgerUsageWindow/unavailableDays`` and
-  /// contributes nothing. A day the range covers wholly that holds nothing in either store also
-  /// contributes nothing, and is *not* unavailable: no usage was recorded for it.
+  /// rows that fall inside the range. Otherwise `daily` is the only store that could answer for the day,
+  /// and it answers only when the range covers the day whole. A day the range only partly covers is never
+  /// read from `daily` — a whole-day aggregate used for part of a day would over-count — so when `daily`
+  /// holds rows for it the day is named in ``LedgerUsageWindow/unavailableDays`` and contributes nothing.
+  /// A day that holds nothing in either store contributes nothing and is *not* unavailable: there is no
+  /// usage recorded for it, so nothing is missing.
   ///
   /// Each day's summary carries per-provider, per-model ``LedgerModelTotals`` in the order
   /// ``summary(since:until:provider:)`` puts them, and ``LedgerUsageWindow/summary`` is the days'
@@ -977,10 +978,11 @@ public final class LedgerStore {
   ///
   /// ## Day counts
   /// ``LedgerUsageWindow/rawDayCount`` plus ``LedgerUsageWindow/rollupDayCount`` plus
-  /// ``LedgerUsageWindow/unavailableDays`` account for every UTC day the range touches, except a whole
-  /// day that holds nothing in either store. Days are walked oldest first, so ``LedgerUsageWindow/days``
-  /// and ``LedgerUsageWindow/unavailableDays`` are in date order, and the walk is by 86 400-second UTC
-  /// days — a UTC day has no DST and no leap second in this store's arithmetic.
+  /// ``LedgerUsageWindow/unavailableDays`` account for every UTC day the range touches, except a day that
+  /// holds nothing in either store — with a `provider`, nothing for that provider. Those are counted
+  /// nowhere, deliberately. Days are walked oldest first, so ``LedgerUsageWindow/days`` and
+  /// ``LedgerUsageWindow/unavailableDays`` are in date order, and the walk is by 86 400-second UTC days —
+  /// a UTC day has no DST and no leap second in this store's arithmetic.
   public func usageWindow(
     since: Date, until: Date, provider: Provider? = nil
   ) throws -> LedgerUsageWindow {
@@ -1025,18 +1027,22 @@ public final class LedgerStore {
             source: .rawRows, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
         Self.merge(groups, into: &merged)
         rawDayCount += 1
-      } else if dayStart >= rangeStart && dayEnd <= rangeEnd {
+      } else {
+        // No raw rows: `daily` is the only store that could answer for this day, and it answers only
+        // when the range covers the day whole — a whole-day aggregate used for part of a day would
+        // over-count. A day `daily` holds nothing for, whole or partial, contributes nothing and is not
+        // unavailable: there is no usage to count, so nothing is missing from it.
         let groups = try dailyDayGroups(dailyRows, date: date, provider: provider)
-        if !groups.isEmpty {
+        if !groups.isEmpty, dayStart >= rangeStart, dayEnd <= rangeEnd {
           days.append(
             LedgerDayUsage(
               date: date, dayStart: Date(timeIntervalSince1970: TimeInterval(dayStart)),
               source: .rollup, summary: LedgerSummary(models: groups.map(Self.modelTotals))))
           Self.merge(groups, into: &merged)
           rollupDayCount += 1
+        } else if !groups.isEmpty {
+          unavailableDays.append(date)
         }
-      } else {
-        unavailableDays.append(date)
       }
       dayStart = dayEnd
     }

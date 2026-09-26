@@ -33,8 +33,8 @@ public struct LedgerDayUsage: Sendable, Equatable {
 /// would, and a day whose raw rows are gone is read from `daily`, which holds whole UTC days only.
 ///
 /// The property that matters for honesty is that no number here is ever derived from a partial day:
-/// a day the range only half covers is either answered from its raw rows or named in
-/// ``unavailableDays``.
+/// a day the range only half covers is either answered from its raw rows or, when the rollup holds rows
+/// for it, named in ``unavailableDays`` instead of being folded in.
 public struct LedgerUsageWindow: Sendable, Equatable {
   /// Every day a store could answer for, oldest first. A day that is only partly inside the range and
   /// has no raw rows is not here — see ``unavailableDays``.
@@ -47,13 +47,16 @@ public struct LedgerUsageWindow: Sendable, Equatable {
   public let rawDayCount: Int
   /// How many of ``days`` came from `daily`.
   public let rollupDayCount: Int
-  /// UTC dates (`YYYY-MM-DD`) that the range only partly covers and has no raw rows for, oldest first.
-  /// They contribute nothing: a rollup is a whole-day aggregate, and using one for part of a day would
-  /// over-count. A day with no usage in either store is listed too, so read the list as "days this range
-  /// did not answer for", not as "days whose data is missing".
+  /// UTC dates (`YYYY-MM-DD`) that the range only partly covers and that the rollup holds rows for,
+  /// oldest first: days with usage the ledger can see but cannot split, because a rollup is one whole
+  /// UTC day. They contribute nothing — using a whole-day aggregate for part of a day would over-count —
+  /// so read the list as "days this range could not answer for although there is usage in them".
   ///
-  /// ``rawDayCount``, ``rollupDayCount`` and this list account for every UTC day the range touches
-  /// except a whole day that holds nothing in either store: a day with no usage in it is counted
-  /// nowhere, deliberately — there is nothing to be missing from it.
+  /// A day the range only partly covers that holds nothing in either store is *not* listed: there is no
+  /// usage to count, so nothing is missing from it. Empty when no such day is in range.
+  ///
+  /// ``rawDayCount``, ``rollupDayCount`` and this list account for every UTC day the range touches except
+  /// a day that holds nothing in either store — with a `provider`, nothing for that provider. Those are
+  /// counted nowhere, deliberately.
   public let unavailableDays: [String]
 }

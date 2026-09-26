@@ -311,6 +311,20 @@ struct LedgerRollupTests {
     #expect(openrouter.rawDayCount == 1)
     #expect(openrouter.rollupDayCount == 0)
     #expect(openrouter.unavailableDays.isEmpty)
+
+    // A partial day is named only when the rollup holds rows for the provider being asked about: the
+    // filter applies to that check exactly as it applies to the rollup read.
+    let partialRange = (since: day1.addingTimeInterval(12 * 3_600), until: day2)
+    let kiloPartial = try fixture.store.usageWindow(
+      since: partialRange.since, until: partialRange.until, provider: .kilo)
+    #expect(kiloPartial.unavailableDays == ["2026-09-27"])
+    #expect(kiloPartial.days.isEmpty)
+    #expect(kiloPartial.summary == LedgerSummary(models: []))
+
+    let openrouterPartial = try fixture.store.usageWindow(
+      since: partialRange.since, until: partialRange.until, provider: .openrouter)
+    #expect(openrouterPartial.unavailableDays.isEmpty)
+    #expect(openrouterPartial.days.isEmpty)
   }
 
   @Test("an importer-shaped record reads the same from the raw rows and from the rollup")
@@ -365,7 +379,7 @@ struct LedgerRollupTests {
     #expect(window.rawDayCount + window.rollupDayCount + window.unavailableDays.count == 1)
   }
 
-  @Test("a partly-inside day with no rows in either store is listed as unavailable")
+  @Test("a partly-inside day with nothing in either store is not listed")
   func partialDayWithNoUsage() throws {
     let fixture = try RollupFixture()
     defer { fixture.destroy() }
@@ -374,18 +388,19 @@ struct LedgerRollupTests {
         simpleRecord(at: day2.addingTimeInterval(3_600), sessionID: "ses_a")
       ]) { $0.sessionID ?? "" } == 1)
 
-    // Nothing was pruned: day1 is simply an empty day the range cuts in half. The rule is about what
-    // the range can answer for, so the day is named — and the report's sentence must therefore say the
-    // partial totals are not included, never that data was lost.
+    // Nothing was pruned and day1 holds nothing: the range cuts it in half, but there is no usage to
+    // count, so the rollup cannot be over-counting anything and the day is not worth naming. This is the
+    // noise the first version produced for a user whose local day is not the UTC day.
     let window = try fixture.store.usageWindow(
       since: day1.addingTimeInterval(12 * 3_600), until: day3)
 
-    #expect(window.unavailableDays == ["2026-09-27"])
+    #expect(window.unavailableDays.isEmpty)
     #expect(window.days.map(\.date) == ["2026-09-28"])
     #expect(window.rawDayCount == 1)
     #expect(window.rollupDayCount == 0)
     #expect(window.summary.requestCount == 1)
-    #expect(window.rawDayCount + window.rollupDayCount + window.unavailableDays.count == 2)
+    // Counted nowhere, like a whole day with no usage: there is nothing missing from it.
+    #expect(window.rawDayCount + window.rollupDayCount + window.unavailableDays.count == 1)
   }
 
   @Test("an empty range touches no days")

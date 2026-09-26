@@ -192,11 +192,19 @@ Deviations from the sketch in [`PLAN.md`](PLAN.md) §4:
 
 `request.ts` is UTC epoch seconds; `daily` is keyed by **UTC date**, which is what makes a long-range query
 cheap and a prune safe. But "what did I spend today" is a question about the user's clock, and a local
-midnight can fall in the middle of a UTC day. So the rollup is never asked for local totals: `deeptally
-usage` and the app's `LocalUsageLedger` both build `[start of a local day, start of the next)` with
-`Calendar` and ask `summary(since:until:)` of the raw rows. Reading "today" out of the UTC rollup would be
-off by a day for every user east or west of UTC — the kind of bug that looks like a rounding error. Days are
-added through the calendar rather than as 86 400 seconds, so a DST day stays a whole local day.
+midnight can fall in the middle of a UTC day. So a local-day figure is never read out of the rollup: the
+app's `LocalUsageLedger` builds `[start of a local day, start of the next)` with `Calendar` and asks
+`summary(since:until:)` of the raw rows. Reading "today" out of the UTC rollup would be off by a day for
+every user east or west of UTC — the kind of bug that looks like a rounding error. Days are added through
+the calendar rather than as 86 400 seconds, so a DST day stays a whole local day.
+
+`usageWindow(since:until:provider:)` is the one reader that does use `daily`, and it does so without that
+bug: it walks the UTC days a range touches and answers each one from `request` while that day still has
+rows, and from `daily` once a prune has taken them — whole UTC days only, which is all a rollup holds. A day
+the range only partly covers is never read from the rollup, because a whole-day aggregate used for part of
+a day would over-count; when `daily` holds rows for such a day it is named as unavailable rather than folded
+in, and a day with no rows in either store contributes nothing. `deeptally usage` builds its windows this
+way, so a pruned range stays visible at the resolution the rollup has, and says so when it is.
 
 ### The watermark, and why re-running is free
 

@@ -217,9 +217,9 @@ a day leaves it out and names the date, and the report says which days came from
 its raw row count.
 
 With `--json` the same numbers come as one document with stable key names: `schema`, `generated_at`,
-`timezone`, `currency`, `days`, `selected`, `windows[]` (`key`, `from`, `until`, `rollupDays`,
-`unavailableDays`, plus the numbers) and `models[]`. `rollupDays` counts the days of that window that came
-from the rollups, and `unavailableDays` lists the `YYYY-MM-DD` UTC dates it left out — the plain report says
+`timezone`, `currency`, `days`, `selected`, `windows[]` (`key`, `from`, `until`, `rollup_days`,
+`unavailable_days`, plus the numbers) and `models[]`. `rollup_days` counts the days of that window that came
+from the rollups, and `unavailable_days` lists the `YYYY-MM-DD` UTC dates it left out — the plain report says
 the same thing in its footnote. Money is a decimal **string**
 (`"spend": "0.000577"`) so no float ever touches it, and `cache_hit_pct` is `null` — not 0 — when there is
 no denominator. Boundaries are ISO-8601 in the report's own time zone, offset included. With no rows at all,

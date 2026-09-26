@@ -62,9 +62,9 @@ struct UsageReport {
     /// How many of these days the ledger answered from the `daily` rollup: their raw rows were pruned.
     /// They are whole UTC days, which is what the footnote under the tables says.
     let rollupDays: Int
-    /// UTC dates (`YYYY-MM-DD`) the window only partly covers and whose raw rows are gone. Their
-    /// partial totals are not included — a whole-day rollup cannot be sliced — so the report names
-    /// them instead of quietly reporting a smaller window.
+    /// UTC dates (`YYYY-MM-DD`) the window only partly covers and that the rollup holds usage for. Their
+    /// partial totals are not included — a whole-day rollup cannot be sliced — so the report names them
+    /// instead of quietly reporting a smaller window.
     let unavailableDays: [String]
 
     /// Prompt plus completion, where prompt already includes cache reads and completion already
@@ -170,8 +170,9 @@ struct UsageReport {
       : "note: \(count) days in these windows come from \(table)"
   }
 
-  /// One sentence naming every UTC date a window could not answer for, or `nil` when every day the
-  /// windows touch is a whole day. The dates are deduplicated across the windows and named in order.
+  /// One sentence naming every UTC date the rollup holds usage for but a window cannot slice, or `nil`
+  /// when every day the windows touch is answerable. The dates are deduplicated across the windows and
+  /// named in order.
   private var unavailableDaysNote: String? {
     let days = Set((windows + [selected]).flatMap(\.unavailableDays)).sorted()
     guard !days.isEmpty else { return nil }
@@ -282,8 +283,10 @@ private struct WindowDocument: Encodable {
   let from: String
   let until: String
   /// How many of the window's days came from the `daily` rollup because their raw rows were pruned.
+  /// Spelled in the document's own style, `rollup_days`, like the numbers beside it.
   let rollupDays: Int
-  /// The `YYYY-MM-DD` UTC dates the window only partly covers and cannot answer for.
+  /// The `YYYY-MM-DD` UTC dates the window only partly covers and cannot answer for despite the rollup
+  /// holding usage in them.
   let unavailableDays: [String]
   let numbers: Numbers
 
@@ -291,8 +294,8 @@ private struct WindowDocument: Encodable {
     case key
     case from
     case until
-    case rollupDays
-    case unavailableDays
+    case rollupDays = "rollup_days"
+    case unavailableDays = "unavailable_days"
   }
 
   init(window: UsageReport.Window, timeZone: TimeZone) {
@@ -306,7 +309,7 @@ private struct WindowDocument: Encodable {
 
   /// The numbers are merged into this object rather than nested under a `totals` key: a script should
   /// read `.windows[0].spend`. The key sets cannot collide — this type's own keys are exactly `key`,
-  /// `from`, `until`, `rollupDays` and `unavailableDays`.
+  /// `from`, `until`, `rollup_days` and `unavailable_days`.
   func encode(to encoder: any Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(key, forKey: .key)
