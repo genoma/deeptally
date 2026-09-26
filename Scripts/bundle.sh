@@ -65,8 +65,7 @@ PLIST
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-echo "==> ad-hoc signing"
-codesign --force --sign - --identifier "$BUNDLE_ID" "$APP"
-codesign --verify --strict "$APP" && echo "signature ok"
+# One signing seam for the whole repo: SIGNING=adhoc (default) or SIGNING=devid (Scripts/sign.sh).
+./Scripts/sign.sh "$APP"
 
 echo "==> built $APP"

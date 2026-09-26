@@ -6,7 +6,7 @@ VERSION ?= 0.1.0
 APP := dist/DeepTally.app
 SWIFT_BUILD := swift build -c release --arch arm64
 
-.PHONY: help build test lint bundle run dmg kill smoke screenshots verify clean
+.PHONY: help build test lint bundle run dmg kill smoke screenshots verify release-assets release-check clean
 
 help:
 	@echo "make build   - release build (app + CLI, arm64)"
@@ -19,6 +19,8 @@ help:
 	@echo "make screenshots - render the real popover to dist/popover[-dark].png"
 	@echo "make run     - bundle and launch the app"
 	@echo "make verify  - build + test + lint + bundle + signature check"
+	@echo "make release-assets - build the release files into dist/ (VERSION=x.y.z)"
+	@echo "make release-check  - verify + release-assets + SHA256SUMS check (VERSION=x.y.z)"
 	@echo "make clean   - remove .build and dist"
 
 build:
@@ -61,6 +63,15 @@ screenshots: bundle
 verify: build test lint bundle
 	codesign --verify --strict $(APP)
 	@echo "verify: ok"
+
+# Everything .github/workflows/release.yml uploads: DMG, CLI tarball, install.sh, formula, SHA256SUMS.
+release-assets:
+	VERSION=$(VERSION) ./Scripts/release-assets.sh
+
+# The release gate: verify first, then build and self-check the published files.
+release-check: verify
+	VERSION=$(VERSION) ./Scripts/release-assets.sh
+	cd dist && shasum -a 256 -c SHA256SUMS
 
 clean:
 	rm -rf .build dist
