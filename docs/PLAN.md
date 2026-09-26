@@ -432,9 +432,9 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   - **What the product is now:** a menu bar app and CLI that show the DeepSeek account balance, a low-balance
     alert, and the peak/off-peak rates in force. It cannot show spend history, because DeepSeek exposes no usage
     endpoint; the README, `USAGE.md` and `PRIVACY.md` state that plainly instead of promising a workaround.
-  - **The old ledger file is left on disk** at `~/Library/Application Support/DeepTally/ledger.sqlite`, untouched by
-    the app; the uninstaller removes it with the app-support directory when the user asks. No user data was deleted
-    by this step.
+  - **The old ledger file was removed at the owner's request** (2026-09-26): `ledger.sqlite` and its sidecars are
+    gone, and the last code and doc notes about a legacy ledger were removed with them, leaving the app-support
+    directory holding only the launch diagnostics. Nothing else was deleted.
   **Gate:** `make verify` green ✅ · popover renders balance and rate only ✅ · `deeptally usage` fails cleanly ✅ ·
   no source or doc reference to a deleted feature ✅
 
@@ -555,3 +555,4 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 6.6 | **API-only reduction executed** (`c3f8584`): 42 files and about 14,500 lines deleted — the ledger (schema, rollups, migrations), the opencode importer, the loopback proxy and its reader, the analytics panel, CSV import/export, reprice, the `usage`/`import`/`ledger` CLI commands and `DEEPTALLY_LEDGER`. Balance, rate, key handling, alerts, settings, login item, uninstaller and the release machinery stay. Tests 396 → 194, then 197 after the review's command-surface suite. |
 | 2026-09-26 | 6.6 | Independent read-only review of the reduction: **no P0/P1**; it walked balance, alerts, key precedence, rate, settings, login item and uninstaller and found nothing removed that they need. Four P2s closed in `0d4d887`: dead API members deleted, the CLI surface covered by tests, stale user-visible text fixed (formula description, uninstaller help, the README hero tagline regenerated), and the docs list passed to the rewrite lane. |
 | 2026-09-26 | 6.6 | Docs rewritten for the smaller product (`a7fcaee`, 10 files, 128 relative links checked, every CLI example pasted from the shipped binary) and the popover screenshots regenerated from the API-only build; the now-unused settings image was deleted. **Step 6.6 closed.** The app is a balance and rate meter: it cannot show spend history because DeepSeek has no usage endpoint, and it no longer pretends otherwise. |
+| 2026-09-26 | 6.6 | **Old ledger removed at the owner's request:** `ledger.sqlite` plus its sidecars deleted (5,275 rows of history, the last copy), and the remaining code and doc notes about a legacy ledger removed with them — the app-support directory now holds only launch diagnostics. No other user data was touched. |
