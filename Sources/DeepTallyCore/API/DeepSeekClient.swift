@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import Foundation
 
-/// Minimal DeepSeek HTTP client. Only the balance and the model list live here; the app records no
-/// per-call usage, because the API stores none.
+/// Minimal DeepSeek HTTP client. Only the balance lives here: DeepSeek exposes no usage or spend
+/// endpoint, and this app records no per-call usage of its own.
 public struct DeepSeekClient: Sendable {
   public enum APIError: Swift.Error, Sendable, Equatable {
     case missingAPIKey
@@ -27,22 +27,8 @@ public struct DeepSeekClient: Sendable {
     self.keyProvider = keyProvider
   }
 
-  /// Development/CLI convenience. The app proper imports the key from the shell into the Keychain
-  /// and reads it from there (Step 3).
-  public static let keyFromEnvironment: @Sendable () -> String? = {
-    ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"]
-  }
-
   public func balance() async throws -> Balance {
     try await get("/user/balance")
-  }
-
-  public func models() async throws -> [ModelInfo] {
-    struct ModelsResponse: Decodable {
-      let data: [ModelInfo]
-    }
-    let response: ModelsResponse = try await get("/models")
-    return response.data
   }
 
   // MARK: - Transport

@@ -614,7 +614,7 @@ private func drawHero(_ cg: CGContext, pixelsWide: Int, pixelsHigh: Int) {
       string: "Tally",
       attributes: [.font: wordFont, .foregroundColor: color(Palette.wordTeal), .kern: -1.5]))
   let tagline = NSAttributedString(
-    string: "DeepSeek balance · spend · cache-hit rate",
+    string: "DeepSeek balance · peak and off-peak rates",
     attributes: [
       .font: NSFont.systemFont(ofSize: 28, weight: .medium),
       .foregroundColor: color(Palette.steel),

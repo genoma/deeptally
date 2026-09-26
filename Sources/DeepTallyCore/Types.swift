@@ -128,23 +128,6 @@ public struct Balance: Sendable, Equatable, Codable {
   }
 }
 
-// MARK: - Models
-
-public struct ModelInfo: Sendable, Equatable, Codable {
-  public let id: String
-  public let ownedBy: String?
-
-  public init(id: String, ownedBy: String? = nil) {
-    self.id = id
-    self.ownedBy = ownedBy
-  }
-
-  private enum CodingKeys: String, CodingKey {
-    case id
-    case ownedBy = "owned_by"
-  }
-}
-
 // MARK: - Pricing and peak / off-peak
 
 /// A daily UTC window (start inclusive, end exclusive) in which peak prices apply.
