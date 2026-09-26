@@ -224,35 +224,60 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     intends. The menu bar shows a stale reading until the Mac is awake and the key resolves again.
 
 ### Step 5 — Analytics popover + exports
-- [ ] Popover: balance card, today/7d/30d spend, cache-hit %, per-model breakdown, cache sparkline
-- [ ] Menu bar metric modes (balance / today $ / cache %), thresholds; CSV export + import
-  **Gate:** cache % matches ledger query; export→import round-trips to identical rollups.
+- [x] Menu bar metric modes (balance / today $ / cache %), thresholds — landed with Step 4's ledger
+- [ ] Popover analytics: today/7d/30d spend, cache-hit %, per-model breakdown, cache trend
+- [ ] **Rollup reader**: the long-range view reads `daily` so pruned history stays visible. Until this
+      exists a pruned range is gone from `deeptally usage`, which the command, its help and the docs now say
+- [ ] Fix finding **N4** in the importer (decide each merge group from all of its copies before the watermark
+      filter) and add the fixture the review said was missing
+- [ ] CSV import/export surfaced in the UI (the ledger and CLI already round-trip it)
+  **Gate:** cache % matches a ledger query; export→import round-trips to identical rollups; a pruned range
+  still shows its aggregate through the rollup reader.
 
 ### Step 6 — Release machinery + uninstaller
 - [ ] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam), `dmg.sh`, `install.sh` (hash-pinned, `--user`), **`uninstall.sh`**
-- [ ] In-app *Uninstall DeepTally…*: unregister login item, move app to Trash, purge app-support/prefs/caches, delete Keychain item, optional ledger export
-- [ ] `.github/workflows/ci.yml` (build, test, lint, SPDX-header grep, codesign verify) and `release.yml` (tag → DMG + `SHA256SUMS` + release)
-- [ ] `docs/INSTALL.md`, `docs/UNSIGNED.md`, `docs/PRIVACY.md`, `docs/ARCHITECTURE.md`, `docs/DEVELOPMENT.md`, `SECURITY.md`, `CONTRIBUTING.md`
+- [ ] In-app *Uninstall DeepTally…*: unregister login item, move app to Trash, purge app-support/prefs/caches,
+      delete the Keychain item, offer a ledger export first
+- [ ] `.github/workflows/ci.yml` (build, test, lint, SPDX-header grep, codesign verify) and `release.yml`
+      (tag → DMG + `SHA256SUMS` + release)
+- [x] User docs written during Steps 3–4: `INSTALL.md`, `UNSIGNED.md`, `PRIVACY.md`, `ARCHITECTURE.md`,
+      `DEVELOPMENT.md`, `RELEASING.md`, `USAGE.md`, `SECURITY.md`, `CONTRIBUTING.md`
+- [ ] **Three Gatekeeper dialog screenshots** remain placeholders in `INSTALL.md`; they need a human to click
+      through a quarantined first launch on macOS 27
 - [ ] Homebrew **formula** tap for `deeptally` only; GitHub Immutable Releases enabled
-  **Gate:** `install → uninstall → reinstall` leaves no residue (verified with a throwaway `HOME`), and the DMG works on a second macOS version.
+  **Gate:** `install → uninstall → reinstall` leaves no residue (verified with a throwaway `HOME`), and the DMG
+  works on a second macOS version.
 
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
 - [ ] `docs/PLAN.md` closed out with the release link
   **Gate:** a fresh macOS 15+/26/27 machine installs using only the published instructions.
 
-## 6. Lane assignments (for parallel subagent work)
+## 6. How lanes are run (learned the hard way)
 
-| Lane | Owns (exclusive files) | Gate |
-|---|---|---|
-| ICON | `Scripts/make-icon.swift`, `Resources/AppIcon.icns`, menu bar template glyph, `docs/assets/hero.png`, `docs/ICON.md` | valid `.icns`, legible at 16px, `sips`-verified sizes |
-| PRICING | `Sources/DeepTallyCore/Pricing/*`, `Resources/PriceTable.json`, `Resources/ChinaHolidays.json`, `Tests/.../PricingTests.swift` | `swift test --filter Pricing` |
-| API | `Sources/DeepTallyCore/API/*`, `Tests/.../APITests.swift` (fixtures only, no network) | `swift test --filter API` |
-| OPENCODE | `Sources/DeepTallyCore/Import/OpenCode*.swift`, `Tests/.../OpenCodeTests.swift` (fixture DB) | idempotent import, no credential-table reads |
-| DOCS | `docs/INSTALL.md`, `UNSIGNED.md`, `PRIVACY.md`, `ARCHITECTURE.md`, `DEVELOPMENT.md`, `RELEASING.md`, `SECURITY.md`, `CONTRIBUTING.md` | every claim traceable to §3 evidence |
+**What works.** Small briefs with exact file ownership: the files a lane owns, the files it must not touch,
+its one gate command, and a compact report format. Every reviewer lane (read-only, no build loop) succeeded.
 
-Parent keeps: `Package.swift`, `Makefile`, app UI, `Scripts/*`, `.github/*`, `AGENTS.md`, this plan.
-One writer per worktree; lanes branch from `develop` and merge back with `--no-ff`.
+**What does not.** A brief that covers several findings at once, or that opens by asking the lane to read
+`AGENTS.md` and this plan, spends 100k+ tokens before the first edit and cannot finish inside the default
+30-minute deadline. Five Step-4 lanes were lost that way having produced nothing (two docs lanes, two fix
+lanes, one core lane). The fix was either several narrow lanes or the parent doing the work directly.
+
+**Rules that came out of it**
+- One writer per file per wave. Two lanes were given the same CLI file in one wave and their work needed a
+  third lane to reconcile; the docs lane noticed the drift before the parent did.
+- Lane task text must contain **no backticks and no `${`**: the workflow script is a JavaScript template
+  literal, so an inline code span silently truncates the brief. Check the manifest before launching and
+  confirm that only the template delimiters carry backticks.
+- Give writer lanes an explicit `timeoutMs` (60 minutes) and `checkpointBeforeDeadlineMs` instead of taking
+  the 30-minute default. A lane that checkpoints can be continued; a lane that is killed has nothing.
+- Verify a lane's claim against the artifact, not its report. Two lanes reported success in words while the
+  work was absent from `develop`; both were caught by checking branches and diffs afterwards.
+- Lanes need the machine **awake**. DarkWake (display off, short maintenance wakes) throttles background work
+  and makes Keychain consent impossible — `-25320 In dark wake, no UI possible` — which is what stalled four
+  lanes and one Keychain read on the night of 2026-09-24/25.
+- The parent keeps: `Package.swift`, `Makefile`, app UI, `Scripts/*`, `.github/*`, `AGENTS.md`, this plan, and
+  every integration merge. Lanes branch from `develop` and merge back with `--no-ff`.
 
 ## 7. Risks
 
@@ -265,6 +290,12 @@ One writer per worktree; lanes branch from `develop` and merge back with `--no-f
 | opencode schema drift | Import breaks | Feature-detection + fixture tests + CLI `--json` escape hatch |
 | macOS 26/27 UI bugs | Silent app death | `NSStatusItem` instead of `MenuBarExtra`-only |
 | Balance is eventually-consistent | Users think it's live | "as of" timestamp, never claim real-time |
+| A typo in the user's price table | Real usage silently billed at zero, and a reprice over the bad table would certify it | Strict parsing + positive-price validation reject the whole table with a sentence naming the model and field (Step 4, F2); the app and CLI surface it instead of pricing around it |
+| A model id the table does not know | `$0.00` rows, which read as *free* rather than *unknown* | The ledger reports unpriced rows (CLI warning, app note); `reprice` repairs stored rows after the table is fixed |
+| Stored cost computed once at import | A table change cannot fix history by re-importing (raw_hash dedupes it) | `reprice` (CLI and app-on-launch) is the repair path; the app runs it once per launch when the table version changed |
+| Rollup versus a later full resync | A partly pruned day can lose the rest of its kept aggregate when a resync rebuilds it | Pre-existing, unchanged by the day-scoped rebuild; `usage` does not read rollups yet. Recorded in Step 5 |
+| Agent lanes stall or are lost | Work does not land; a lane can report success in words with nothing committed | Small briefs, explicit 60-minute deadlines with checkpointing, one writer per file, and a parent check of branches and diffs (§6) |
+| App-layer claims unverified | Regressions in `AppModel` wiring | Closed in Step 4: `Tests/DeepTallyAppTests` covers the app layer (55 tests) over documented seams |
 
 ## 8. Versioning & release policy
 
@@ -281,6 +312,10 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | Personal tap with a `deeptally` formula | **yes**, Step 6 (CLI only — never a cask) |
 | CNY handling | **show as-is**, never convert |
 | Off-peak visibility | **rate-now indicator** in local time + countdown + effective prices |
+| Currency setting | **removed** (Step 4, review finding 2): decision 13 says the account currency is shown as-is, so a control that could not change anything was deleted rather than implemented |
+| Price-table amounts | **strict**: an unparsable or non-positive amount rejects the whole table, naming the model and field; the balance API's strings stay tolerant because they come from a remote service |
+| Ledger money | **integer micro-USD** exposed as `Decimal` — a deliberate departure from this plan's original `REAL` sketch, because a ledger is the worst place to accept binary-float drift |
+| Model id resolution | **aliases as data** in the price table, four documented rules, case-sensitive, `nil` for anything unrecognised so it can be reported as unpriced rather than priced wrongly |
 
 ## 10. Progress log
 
