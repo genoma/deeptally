@@ -138,6 +138,33 @@ jobs:
             "${assets[@]}"
           echo "published https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
 
+      - name: Verify the published CLI installs through Homebrew
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The tap update is a manual step after the release, so install the formula the release
+          # itself carries, through a throwaway tap: the same URL and checksum a user takes. This is
+          # the check v0.1.1 needed — its formula symlinked the binary and the CLI could not find its
+          # resource bundle. Failing here cannot unpublish, so it is an alarm, and the fix is the
+          # next patch version (docs/RELEASING.md).
+          brew tap-new local/release-verify >/dev/null
+          TAPDIR="$(brew --repository local/release-verify)"
+          mkdir -p "$TAPDIR/Formula"
+          gh release download "$TAG" --pattern deeptally.rb --dir "$TAPDIR/Formula"
+          HOMEBREW_NO_AUTO_UPDATE=1 brew install local/release-verify/deeptally
+          reported="$(deeptally --version | awk '{ print $2 }')"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::the Homebrew-installed CLI reports '$reported', not '$VERSION'" >&2
+            exit 1
+          fi
+          deeptally rate >/dev/null
+          brew test local/release-verify/deeptally
+          brew uninstall deeptally
+          brew untap local/release-verify
+          echo "the published formula installs a working CLI"
+
       - name: Dry run — nothing was published
         if: github.event_name == 'workflow_dispatch'
         run: |
