@@ -1,0 +1,154 @@
+# Unsigned: what ad-hoc signing means for DeepTally
+
+DeepTally ships **ad-hoc signed** (`codesign --sign -`) and **not notarized**. This page explains exactly
+what macOS does with an app like that, so no dialog comes as a surprise. The short version: the warnings
+are about *who* built the app, not about whether the app is intact.
+
+## Why there is no Developer ID and no notarization
+
+Notarization requires an Apple Developer Program membership ($99/year), which this project deliberately does
+not have ([`PLAN.md`](PLAN.md) §1). Without a Developer ID certificate, notarization is impossible, and
+ad-hoc is the only signature left: the build machine has zero code-signing identities (verified 2026-09-24).
+The practical consequences are all on this page — first-launch Gatekeeper friction, a Gatekeeper exception
+that is bound to each individual build, and no Homebrew cask (casks now require Gatekeeper-passing apps).
+
+## An ad-hoc signature is an integrity checksum, not an identity
+
+macOS requires every arm64 executable to carry at least an ad-hoc signature; without one it refuses to run
+the binary at all. An ad-hoc signature says "this bundle is internally consistent" — it is computed from the
+bundle's own contents — not "this bundle was built by a known developer". There is no certificate, no team
+identifier and no notarization ticket behind it.
+
+## `spctl` reports "rejected" — that is expected
+
+```sh
+spctl -a -vv /Applications/DeepTally.app   # or wherever your copy lives
+```
+
+`spctl` assesses Developer ID signing plus notarization, so for DeepTally it reports **rejected**. That
+verdict means "not notarized by Apple"; it does not mean the app is corrupt, and it does not mean the
+download was tampered with. The check that actually protects you here is the SHA-256 verification below.
+
+Observed 2026-09-24 on macOS 27, against a locally built bundle (`dist/DeepTally.app`; the path is whatever
+copy you assess):
+
+```text
+$ spctl -a -vv dist/DeepTally.app
+dist/DeepTally.app: rejected
+$ echo $?
+3
+```
+
+The verdict is about notarization, not integrity. The DMG → `/Applications` first-launch flow is still
+pending its dialog screenshots — S1 is text-complete but visually incomplete ([`INSTALL.md`](INSTALL.md)).
+
+## Gatekeeper gates on quarantine, not on the signature
+
+The `com.apple.quarantine` extended attribute is what triggers the "could not verify" block. Browsers attach
+it to downloads; `curl` does not. A `curl`-downloaded DMG carries only `com.apple.provenance`
+(verified 2026-09-24, spike S6) and launches without any Gatekeeper dialog. That is why the install script
+in [`INSTALL.md`](INSTALL.md) uses `curl` instead of asking you to use a browser.
+
+To see what a file carries:
+
+```sh
+xattr -p com.apple.quarantine /Applications/DeepTally.app
+```
+
+`No such xattr` (and a non-zero exit status) means nothing is quarantined. The full list of attributes is
+`xattr -l /Applications/DeepTally.app`.
+
+## Removing quarantine by hand — and when not to
+
+```sh
+xattr -dr com.apple.quarantine /Applications/DeepTally.app
+```
+
+This is equivalent to telling macOS "I vouch for this file". It deletes the only check Gatekeeper was
+performing, so only do it for a DMG taken from the official GitHub Releases page whose SHA-256 you verified
+against the published `SHA256SUMS`. If you cannot verify the checksum, use the `curl` install path in
+[`INSTALL.md`](INSTALL.md) instead — it never creates the attribute in the first place.
+
+## Verifying the download (SHA-256)
+
+Each release publishes the DMG, the CLI tarball `deeptally-X.Y.Z-arm64.tar.gz`, `install.sh`, the Homebrew
+formula `deeptally.rb` and a `SHA256SUMS` file with one `shasum -a 256` line for each of them. The release
+workflow generates `SHA256SUMS`, checks it against the built files, and only then uploads anything.
+
+Because the list covers four files, `shasum -a 256 -c SHA256SUMS` only works when all of them are in the
+directory. If you downloaded **only the DMG** — the usual manual path — pull its line out and check that:
+
+```sh
+grep 'DeepTally-' SHA256SUMS | shasum -a 256 -c -
+```
+
+Expected output:
+
+```text
+DeepTally-<version>.dmg: OK
+```
+
+`grep 'DeepTally-'` matches only the DMG line; the other entries start with lowercase `deeptally`. If you
+downloaded every file, check the whole list, from the directory that holds them:
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+The install script performs exactly the DMG check above against the same file, so a script install is
+verified for you. A checksum only proves that the file matches the list it is checked against. Fetch both
+from the same release page over HTTPS; a checksum shipped by an attacker proves nothing.
+
+## Keychain access across an update
+
+Intuition says an update should re-prompt: Keychain access is bound to an app's code signature, and an ad-hoc
+signature is content-derived, so a rebuilt bundle is a different app. **Measured, it does not.** Build 1
+(`cdhash a7759218…`) created the item; build 2 (`cdhash 1370f937…`, same bundle ID) read it back with
+`errSecSuccess` and no dialog ([`SPIKES.md`](SPIKES.md) S5). `SecItemAdd` without an explicit ACL creates an
+item whose default ACL is permissive for the user's own session.
+
+That is what removes the friction — and it is the trade-off: any process running as you can read the item
+without a dialog, exactly as it can read a key exported in a shell rc file. A stricter, per-app ACL is a
+deliberate future option, not something this build does by accident.
+
+## Login items and notifications work under ad-hoc signing
+
+Measured 2026-09-24: `SMAppService.mainApp.register()` returned status `enabled` immediately for the
+ad-hoc-signed bundle — from a build directory as well as from `/Applications` — with **no approval prompt**,
+and `unregister()` returned `notRegistered` ([`SPIKES.md`](SPIKES.md) S3). DeepTally's **Launch at login**
+switch is therefore the whole implementation: no LaunchAgent, no privileged helper, nothing extra to audit.
+The one state it refuses to register from is a translocated copy, whose path is a read-only temporary
+directory that disappears ([`INSTALL.md`](INSTALL.md), [`USAGE.md`](USAGE.md)).
+
+Notifications were measured the same way (S4): the bundle raised the system prompt and returned
+`{"granted":true}`. A denial is a normal outcome, not a failure — the app keeps working, the popover still
+shows the low balance, and the fallback is the **menu-bar warning glyph**: while the balance is low the gauge
+is replaced by a warning triangle whose tooltip names the amount.
+
+## Managed Macs
+
+If your Mac is enrolled in MDM, policy can refuse apps that are not Developer ID signed and notarized, and
+it can override the manual "Open Anyway" flow. There is no workaround from our side; ask your administrator
+whether ad-hoc signed apps are permitted.
+
+## The short version
+
+- The download should come from the official GitHub Releases page over HTTPS, and its SHA-256 should be
+  verified against `SHA256SUMS`.
+- Move the app into `/Applications` before the first launch, so macOS never runs it through App
+  Translocation.
+- A Gatekeeper block and a System Settings detour on first launch are expected; a `spctl` verdict of
+  "rejected" is expected too, and means "not notarized", nothing more.
+- **No Keychain prompt per update.** Measured 2026-09-24: an item written by build 1 was read back silently by
+  build 2, whose ad-hoc signature has a different hash. The item uses the default keychain ACL, which is
+  permissive for the user's own session. That is what removes the friction — and it is also the trade-off:
+  any process running as you can read it without a dialog, exactly as it can read a key exported in a shell
+  rc file. A stricter, per-app ACL is a deliberate future option, not something this build does by accident.
+- **Login at start-up works without a Developer ID.** Measured 2026-09-24: `SMAppService.mainApp` registers
+  the ad-hoc bundle with no approval prompt, so there is no LaunchAgent or helper to install. The one state
+  the app refuses to register from is a translocated copy.
+- **Every update needs the Gatekeeper detour again.** Measured the same day: after approving build 1, the
+  build-2 bundle with a different signature hash was killed by the kernel (`Killed: 9`) until it was approved
+  again. Gatekeeper exceptions are bound to the exact code identity, so a browser-downloaded update costs
+  another System Settings trip. Updating through the `curl` install script avoids this completely, because
+  that copy is never quarantined in the first place.
