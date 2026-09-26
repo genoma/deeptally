@@ -43,8 +43,10 @@ DeepSeek API ──balance──> DeepSeekClient ──> BalanceMonitor ──> 
                                                                               └─ Quit + key origin
 
 local usage:
-  opencode.db ──read-only──> OpenCodeImporter ──┐
-                                                ├─> LedgerSync ──> LedgerStore (SQLite, WAL)
+  opencode.db ──read-only──> OpenCodeImporter ────┐
+                                                  ├─> LedgerSync ──> LedgerStore (SQLite, WAL)
+  chat client ──> 127.0.0.1:8787 ──> api.deepseek.com
+                  (response usage only) ──────────┘
   PriceTable.json + ChinaHolidays.json ─> CostEngine (prices each row once, at its own instant)
                                                                       │
                                      local-day ts ranges ──> LedgerSummary ──> `deeptally usage`
@@ -61,7 +63,10 @@ and the app's menu-bar metrics. Both ask the ledger for a `ts` range built from 
 is the split the next section explains. The app runs one import pass at launch and every fifteen minutes
 (`LocalUsageLedger`, an actor, so neither the SQLite work nor a full scan of a large database reaches the
 main actor); the CLI imports on demand. Both use the same `LedgerSync` flow, so "what happens if I import
-twice?" has one answer in one place.
+twice?" has one answer in one place. The loopback proxy is a second producer into the same flow: while it
+is on it forwards a client's requests to `api.deepseek.com`, `ProxyUsageReader` taps the response's `usage`
+object, and `LedgerSync` writes one row per completion with `source: proxy`, priced by the same `CostEngine`
+as every other row.
 
 ## Menu bar and lifecycle
 
@@ -154,7 +159,7 @@ One SQLite file at `~/Library/Application Support/DeepTally/ledger.sqlite` — W
 CREATE TABLE request (
   id INTEGER PRIMARY KEY,
   ts INTEGER NOT NULL,                    -- whole epoch seconds, UTC
-  source TEXT NOT NULL,                   -- 'opencode' today; 'proxy','csv','manual' reserved
+  source TEXT NOT NULL,                   -- 'opencode','proxy' today; 'csv','manual' reserved
   provider TEXT NOT NULL,                 -- 'deepseek','kilo','openrouter','unknown'
   model TEXT NOT NULL,                    -- the id exactly as the source spelled it
   input INTEGER NOT NULL DEFAULT 0,       -- cache-miss prompt tokens (cache writes folded in)
@@ -186,7 +191,7 @@ Deviations from the sketch in [`PLAN.md`](PLAN.md) §4:
 - **`daily` has no `cache_write` column**, which loses nothing today: records built from opencode's counters
   fold cache writes into `input`, so the prompt-side columns still add up. `request` stays the exact store.
 - **`source` carries no `CHECK`.** The column is written from the `UsageSource` enum, and CSV rows with an
-  unknown source are rejected at parse time, so an unknown string cannot arrive through either path.
+  unknown source are rejected at parse time, so an unknown string cannot arrive through any path.
 - An index on `ts` was added; every range query, and the prune, scans by it.
 
 ### Why a UTC rollup and local-day ranges
@@ -269,6 +274,7 @@ Rows mean different things depending on where they came from, so provenance is s
 |---|---|---|
 | DeepSeek API | Account balance (`GET /user/balance`) | Authoritative for the account, but eventually consistent — always shown with an "as of" timestamp, never as real-time. |
 | DeepSeek per-response usage | Prompt / completion / cache counters | Authoritative for the requests DeepSeek served. |
+| Local proxy (`source: proxy`) | A client's requests and DeepSeek's responses, forwarded through `127.0.0.1:8787` | The response's own counters, captured at the API boundary and priced locally like any other row; scoped to the completions a client sent through the proxy while it was on. |
 | opencode import | Tokens and counters recorded in the local DB | Real counters, but scoped to what opencode recorded on this Mac. |
 | Gateway imports (`kilo`, `openrouter`) | Per-request usage reported by a gateway | Real counters, priced locally like any other row; DeepTally cannot check a gateway's cost claims against DeepSeek's billing, so treat the figure as an estimate. |
 | CSV / manual | Rows you supply | Taken at face value, with provenance recorded so they can be filtered or removed. |
@@ -310,6 +316,7 @@ shows "what am I paying right now" instead of a static price list.
 | `Sources/DeepTallyCore/Pricing/` | `PriceTableLoader` (bundled + user override), `HolidayCalendar`, `PeakOffPeakEngine`, `CostEngine` |
 | `Sources/DeepTallyCore/Rate/RateNowPresenter.swift` | "What am I paying right now", formatted for the injected time zone |
 | `Sources/DeepTallyCore/Import/OpenCodeImporter.swift` | Read-only union of opencode's two schema generations; credential tables denied at the connection |
+| `Sources/DeepTallyCore/Proxy/` | `ProxyUsage` (one response's usage) and `ProxyUsageReader` (JSON bodies and SSE streams; usage only, content never retained) |
 | `Sources/DeepTallyCore/Ledger/` | `LedgerStore` (schema, inserts, rollups, prune, CSV), `LedgerRollups` (day-window value types), `LedgerSync` (the one incremental flow), `LedgerSummary`, `LedgerCSV`, `LedgerReprice` |
 | `Sources/DeepTallyCore/Resources/` | `PriceTable.json` and `ChinaHolidays.json` — versioned data, not code |
 | `Sources/DeepTallyApp/AppEnvironment.swift` | The composition root (and `LaunchStateStore`); builds the ledger's importer and costing |

@@ -10,16 +10,17 @@ first of them today:
 
 | Host | Purpose | What is sent |
 |---|---|---|
-| `api.deepseek.com` | Account balance (`GET /user/balance`) — the only request any build makes today. The client also implements the model list (`GET /models`), but nothing calls it yet. | Your API key as the `Authorization: Bearer …` header, and the request path. Nothing else. |
+| `api.deepseek.com` | Account balance (`GET /user/balance`) — the only request any build makes on its own. While the local proxy is on, everything your clients send through it is forwarded here too, and to no other host. The client also implements the model list (`GET /models`), but nothing calls it itself. | Your API key as the `Authorization: Bearer …` header, and the request path. A proxied request carries whatever your client sent it, body included; none of that is stored ([The local proxy](#the-local-proxy)). |
 | `api.github.com` | **Reserved, not used yet** — an update check is the only thing allowed to contact it ([`../AGENTS.md`](../AGENTS.md) §1) | Nothing today: no current build makes this request. TODO: no step in [`PLAN.md`](PLAN.md) schedules the update check, so no release metadata is fetched. |
 
 As with any HTTPS request, the host sees your IP address and the time of the request. DeepTally adds no
 identifiers, and there is no other host: no analytics endpoint, no error-reporting endpoint, no CDN.
 
-The optional usage-capture proxy is **deferred to v1.1 and does not exist in any current build** — nothing
-listens on a port today. When it lands it will be opt-in and bind `127.0.0.1` only, so it is reachable from
-your Mac and nowhere else; it will record counters, timestamps and model names for the requests that pass
-through it, and discard request and response bodies immediately.
+The optional usage-capture proxy is **off by default** — nothing listens on a port until you turn it on in
+Settings. While it is on it binds `127.0.0.1` only, so it is reachable from your Mac and nowhere else, and
+it forwards only to `api.deepseek.com`, so it is not a general-purpose relay. It records counters,
+timestamps and model names for the completions that pass through it; the bodies and headers it handled are
+discarded, and the exact statement is in [The local proxy](#the-local-proxy) below.
 
 ## API key
 
@@ -54,11 +55,37 @@ extracted, stored or transmitted. The one identifier the import keeps is opencod
 which groups the requests of one session and says nothing about what was asked; deduplication uses a
 SHA-256 hash of the source row's identity (`source`, id, `session_id`), not its content.
 
+## The local proxy
+
+The optional **Local usage proxy** ([`USAGE.md`](USAGE.md#capturing-any-clients-usage-local-proxy)) is the one
+local source that sees your requests as they happen. It is **off by default** — nothing listens on a port
+until you turn it on in Settings — and its design is what keeps it from being an open relay:
+
+- it binds `127.0.0.1` only, so it is reachable from your Mac and nowhere else;
+- it forwards **only** to `https://api.deepseek.com`; a request cannot make it connect anywhere else;
+- it handles the full request body and the `Authorization` header **in memory** as the request passes
+  through, and relays the response back to the client. That is what proxying means: your request and
+  DeepSeek's answer are visible to the app for the moment they transit the port.
+
+What is stored is the same class of data as every other source: token counters, the model id, the provider,
+the response `id`, the observation timestamp and the locally estimated cost — one ledger row per completed
+completion, with `source: proxy`, priced by the same engine as any other row.
+
+What is **never** stored or logged: request or response bodies, headers (including `Authorization`), the API
+key, and message content. Usage is read out of the response's `usage` object — a JSON body for a
+non-streaming call, the final chunk of an SSE stream for a streaming one — and the message content beside it
+is discarded as the response passes. A request that carries no usage (a balance call, a model list, a
+cancelled call) writes nothing. Calls made before the proxy was on cannot be recovered: DeepSeek keeps no
+usage history DeepTally can read.
+
+Turning the proxy off closes the listener. A client pointed back at `api.deepseek.com` returns to the direct
+path, and the balance is unaffected either way — it always came from `GET /user/balance`.
+
 ## What is stored on disk
 
 | What | Where | Notes |
 |---|---|---|
-| Usage ledger | `~/Library/Application Support/DeepTally/ledger.sqlite` (SQLite; `-wal` and `-shm` side files while it is open) | One row per imported request: token counters (prompt / cache-read / cache-miss / completion / reasoning), the instant, `source`, `provider`, model id, the estimated cost, the opaque opencode `session_id` and the dedupe `raw_hash`. A `daily` rollup and a `meta` table (schema version, import watermark, last price-table version) live in the same file. No prompt or completion text, ever. |
+| Usage ledger | `~/Library/Application Support/DeepTally/ledger.sqlite` (SQLite; `-wal` and `-shm` side files while it is open) | One row per captured request (imported or proxied): token counters (prompt / cache-read / cache-miss / completion / reasoning), the instant, `source`, `provider`, model id, the estimated cost, the opaque opencode `session_id` and the dedupe `raw_hash`. A `daily` rollup and a `meta` table (schema version, import watermark, last price-table version) live in the same file. No prompt or completion text, ever. |
 | Settings | `~/Library/Preferences/io.github.genoma.deeptally.plist` (`UserDefaults`), key `io.github.genoma.deeptally.settings` | One JSON blob: refresh cadence, low-balance threshold, menu bar metric, notifications on/off and the notification cooldown. It also carries `showSecondaryMetric`, an unused flag that no build reads. No currency is stored: the account currency is shown exactly as the API reports it. |
 | Last balance reading | Same plist, key `io.github.genoma.deeptally.last-reading` | The last successful `/user/balance` answer — amounts, currency, availability flag — plus the instant it was fetched. It exists so a relaunch can show the amount immediately with a truthful "as of" age instead of an empty panel. |
 | Last low-balance alert | Same plist, key `io.github.genoma.deeptally.last-notified` | A timestamp, written only after macOS accepted the alert, so the cooldown survives a relaunch — while a denied or failed post is retried instead of being recorded as delivered. |
@@ -75,9 +102,10 @@ the Keychain, and nowhere else.
 Two things worth stating plainly:
 
 - All spend figures are **local estimates**. DeepSeek has no historical usage API, and the ledger cannot see
-  usage from other machines, from the web dashboard, or anything opencode itself did not record. It does
-  catch up on rows that were recorded while DeepTally was closed: the next import reads them
-  ([`PLAN.md`](PLAN.md) §7). That is a capability limit, not a data-collection one.
+  usage from other machines, from the web dashboard, or anything opencode itself did not record and no
+  client sent through the proxy. It does catch up on rows that were recorded while DeepTally was closed:
+  the next import reads them ([`PLAN.md`](PLAN.md) §7). That is a capability limit, not a data-collection
+  one.
 - Peak/off-peak classification needs a holiday calendar; it ships as a data file
   (`Sources/DeepTallyCore/Resources/ChinaHolidays.json`) instead of being fetched from a third-party API.
 
