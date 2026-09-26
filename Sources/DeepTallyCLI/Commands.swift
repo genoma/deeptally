@@ -21,9 +21,9 @@ private struct CommandFailure: Error {
 
 /// The CLI companion to the app: same key precedence, same price table, no second opinion.
 enum CLI {
-  /// The release version, read from the resource bundle beside the binary; `dev` outside a staged
-  /// release. See ``CLIVersion``.
-  static let version = CLIVersion.current
+  /// The release version, stamped into the resource bundle by `Scripts/release-assets.sh`; `dev` in a
+  /// development build. See ``CoreVersion``.
+  static let version = CoreVersion.release
 
   /// `--help` output. One line per command, descriptions aligned like the Makefile's `help` target.
   static let usageText = """
