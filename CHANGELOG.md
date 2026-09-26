@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - The `deeptally` CLI reported a hardcoded `0.1.0-dev` version instead of the release it shipped in. It now
-  reads the version from the resource bundle that travels beside the binary, which `Scripts/release-assets.sh`
-  stamps with the release version; development builds report `dev`. The release gate refuses to publish a
-  tarball whose CLI reports anything other than the version being released.
+  reads the version from a `Version.txt` resource that ships with its price table, which
+  `Scripts/release-assets.sh` stamps with the release version; development builds report `dev`. The release
+  gate refuses to publish a tarball whose CLI reports anything other than the version being released.
 
 ## [0.1.0] - 2026-09-26
 
