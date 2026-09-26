@@ -20,6 +20,7 @@ Usage: uninstall.sh [--app PATH] [app flags]
   --home PATH       treat PATH as the home directory whose data is removed
   --keep-data       keep the ledger, preferences and caches
   --keep-keychain   keep the API key in the Keychain
+  --keep-login-item keep the macOS login item registered (the release gate uses this)
   --trash-dir PATH  move the app to PATH instead of the Trash
   --help            show this help and exit
 
@@ -55,7 +56,7 @@ while [ $# -gt 0 ]; do
       APP_PATH="$2"
       shift 2
       ;;
-    --yes|--print-only|--keep-data|--keep-keychain)
+    --yes|--print-only|--keep-data|--keep-keychain|--keep-login-item)
       PASS+=("$1")
       shift
       ;;
@@ -69,7 +70,7 @@ while [ $# -gt 0 ]; do
       exit 0
       ;;
     *)
-      fail "unknown option '$1' — the app accepts only --yes, --print-only, --home PATH, --keep-data, --keep-keychain and --trash-dir PATH"
+      fail "unknown option '$1' — the app accepts only --yes, --print-only, --home PATH, --keep-data, --keep-keychain, --keep-login-item and --trash-dir PATH"
       ;;
   esac
 done
