@@ -53,6 +53,13 @@ actor UsageProxyServer: UsageProxyServing {
   /// events there; each connection hops off it into a `Task` immediately, so nothing but framework
   /// callbacks run on it.
   private let queue: DispatchQueue
+  /// How long one read may take before the client is refused. A local client that connects and then
+  /// stops sending would otherwise hold a connection slot forever (test seam: the shipping default is
+  /// generous, and the tests pass something short).
+  private let readTimeout: TimeInterval
+  /// The most connections served at once. Beyond this the proxy answers 503 rather than accumulating
+  /// tasks; a chat client needs a handful, and the rest is a client that is misbehaving.
+  private let maximumConnections: Int
 
   private var listener: NWListener?
   /// What `start` was asked for, so a second start with the same port does not rebind.
@@ -66,12 +73,16 @@ actor UsageProxyServer: UsageProxyServing {
     upstream: any ProxyUpstream,
     record: @escaping ProxyUsageRecorder,
     now: @escaping @Sendable () -> Date = { Date() },
-    queue: DispatchQueue = DispatchQueue(label: "io.github.genoma.deeptally.proxy")
+    queue: DispatchQueue = DispatchQueue(label: "io.github.genoma.deeptally.proxy"),
+    readTimeout: TimeInterval = 30,
+    maximumConnections: Int = 32
   ) {
     self.upstream = upstream
     self.record = record
     self.now = now
     self.queue = queue
+    self.readTimeout = readTimeout
+    self.maximumConnections = maximumConnections
   }
 
   // MARK: - Lifecycle
@@ -118,12 +129,16 @@ actor UsageProxyServer: UsageProxyServing {
         bound.resolve(.notListening(reason: "binding port \(port) failed"))
       }
     }
-    let handler = ProxyConnectionHandler(upstream: upstream, record: record, now: now)
+    let handler = ProxyConnectionHandler(
+      upstream: upstream, record: record, now: now, readTimeout: readTimeout)
     listener.newConnectionHandler = { [queue, weak self] connection in
       Task {
-        await self?.track(connection)
-        await handler.serve(connection, on: queue)
-        await self?.untrack(connection)
+        if let self, await self.track(connection) {
+          await handler.serve(connection, on: queue)
+          await self.untrack(connection)
+        } else {
+          await handler.refuseBusy(connection, on: queue)
+        }
       }
     }
     self.listener = listener
@@ -152,8 +167,11 @@ actor UsageProxyServer: UsageProxyServing {
   }
 
   /// Remembers an accepted connection so ``stop()`` can cancel it.
-  private func track(_ connection: NWConnection) {
+  /// Tracks one accepted connection, or answers `false` when the proxy is already at its limit.
+  private func track(_ connection: NWConnection) -> Bool {
+    guard connections.count < maximumConnections else { return false }
     connections[ObjectIdentifier(connection)] = connection
+    return true
   }
 
   private func untrack(_ connection: NWConnection) {
@@ -232,6 +250,15 @@ private struct ProxyConnectionHandler: Sendable {
   let upstream: any ProxyUpstream
   let record: ProxyUsageRecorder
   let now: @Sendable () -> Date
+  /// How long one read may take before the client is refused (``UsageProxyServer`` owns the policy).
+  let readTimeout: TimeInterval
+
+  /// Answers a connection the proxy has no room for, then closes it.
+  func refuseBusy(_ connection: NWConnection, on queue: DispatchQueue) async {
+    connection.start(queue: queue)
+    defer { connection.cancel() }
+    try? await Self.write(Self.busy, over: connection)
+  }
 
   /// Serves one connection to completion.
   ///
@@ -261,7 +288,7 @@ private struct ProxyConnectionHandler: Sendable {
       if buffer.count > Self.maximumHeadBytes {
         throw ProxyRefusal(status: 431, sentence: Self.headTooLarge)
       }
-      guard let chunk = try await Self.receive(from: connection) else {
+      guard let chunk = try await Self.receive(from: connection, within: readTimeout) else {
         throw ProxyConnectionEnded()
       }
       buffer.append(chunk)
@@ -283,7 +310,7 @@ private struct ProxyConnectionHandler: Sendable {
     let bodyLength = head.declaredBodyLength ?? 0
     var body = Data(buffer.dropFirst(headByteCount))
     while body.count < bodyLength {
-      guard let chunk = try await Self.receive(from: connection) else {
+      guard let chunk = try await Self.receive(from: connection, within: readTimeout) else {
         throw ProxyConnectionEnded()
       }
       body.append(chunk)
@@ -370,6 +397,11 @@ private struct ProxyConnectionHandler: Sendable {
     let response: ProxyUpstreamResponse
     do {
       response = try await upstream.send(request)
+    } catch ProxyUpstreamError.unusableURL {
+      // Nothing has been written to the client yet, so the reason it failed is still available and
+      // worth saying: a target the proxy cannot turn into a path is a 400, not an upstream outage.
+      try await Self.write(Self.invalidTarget, over: connection)
+      return
     } catch {
       // Nothing has been written to the client yet, so the truth is still available: one 502, and no
       // record, because a request that never completed was never billed.
@@ -383,9 +415,20 @@ private struct ProxyConnectionHandler: Sendable {
     }
   }
 
+  /// The one answer for a proxy that is already serving as many connections as it will.
+  private static let busy = ProxyRefusal(
+    status: 503, sentence: "The local proxy is busy; try again in a moment.")
+
   /// The one answer for an upstream that never completed, or completed only part of its body.
   private static let upstreamFailure = ProxyRefusal(
     status: 502, sentence: "The upstream request to api.deepseek.com failed.")
+
+  /// A target Foundation cannot turn into a path is the client's mistake, not the upstream's.
+  private static let invalidTarget = ProxyRefusal(
+    status: 400, sentence: "The request target is not a valid path for api.deepseek.com.")
+
+  /// The one answer for a client that connected and then stopped sending.
+  private static let readTimedOut = "The request was not received in time."
 
   /// A response that is not a stream: read it whole, then write it back with the upstream's status,
   /// its headers and the `Content-Length` of the bytes actually written.
@@ -553,6 +596,23 @@ private struct ProxyConnectionHandler: Sendable {
 
   // MARK: - The socket
 
+  /// The next bytes from the client, or `nil` when the connection ended; throws when the client has
+  /// not sent anything for `seconds`. The loser of the race is cancelled, and the connection is
+  /// closed by the caller, which is what unblocks a receive that is still waiting.
+  private static func receive(
+    from connection: NWConnection, within seconds: TimeInterval
+  ) async throws -> Data? {
+    try await withThrowingTaskGroup(of: Data?.self) { group in
+      group.addTask { try await receive(from: connection) }
+      group.addTask {
+        try await Task.sleep(for: .seconds(seconds))
+        throw ProxyRefusal(status: 408, sentence: readTimedOut)
+      }
+      defer { group.cancelAll() }
+      return try await group.next() ?? nil
+    }
+  }
+
   /// The next bytes from the client, or `nil` when the connection ended.
   private static func receive(from connection: NWConnection) async throws -> Data? {
     try await withCheckedThrowingContinuation { continuation in
@@ -638,13 +698,23 @@ private struct ProxyRequestHead {
   /// `Accept-Encoding` is the proxy's decision, because ``URLSessionProxyUpstream`` decodes whatever
   /// encoding it negotiates with the upstream.
   func forwardedHeaders(bodyCount: Int) -> [ProxyHeader] {
-    var forwarded = headers.filter { !Self.droppedRequestHeaders.contains($0.name.lowercased()) }
+    // RFC 7230 §6.1: the client's `Connection` header names tokens that apply to that connection
+    // only, and they must not travel on. The static list covers the usual ones even when a client
+    // omits the header; this covers anything a client chooses to name.
+    var dropped = Self.droppedRequestHeaders
+    for header in headers where header.name.lowercased() == "connection" {
+      for token in header.value.split(separator: ",") {
+        dropped.insert(token.trimmingCharacters(in: .whitespaces).lowercased())
+      }
+    }
+    var forwarded = headers.filter { !dropped.contains($0.name.lowercased()) }
     forwarded.append(ProxyHeader(name: "Content-Length", value: "\(bodyCount)"))
     return forwarded
   }
 
   private static let droppedRequestHeaders: Set<String> = [
-    "host", "connection", "keep-alive", "proxy-connection", "transfer-encoding", "content-length",
+    "host", "connection", "keep-alive", "proxy-connection", "proxy-authorization", "te",
+    "trailer", "transfer-encoding", "upgrade", "content-length",
     "expect", "accept-encoding",
   ]
 }

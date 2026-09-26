@@ -363,6 +363,18 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
     table shows `$0.00` for 16 µUSD, which is the documented two-decimal floor, not a missing row.
   - `lsof` on the running proxy: `TCP 127.0.0.1:PORT (LISTEN)` — loopback only.
   - Harness: `/tmp/deeptally-proxy-gate.sh`.
+  - **Independent review (fresh context, read-only):** no P0/P1; seven P2s, all closed. Two documentation
+    mismatches (`ARCHITECTURE.md` credited `LedgerSync` with the proxy row; `PRIVACY.md`'s settings row
+    omitted the two new fields), one UI quirk (a port change could caption the old port until the new bind
+    landed), and four hardening/precision items: request-side hop-by-hop headers now follow RFC 7230 §6.1
+    (the client's own `Connection` tokens are stripped, and `te`/`trailer`/`upgrade`/`proxy-authorization`
+    are always dropped); the listener caps concurrent connections (503 beyond 32) and times out an idle
+    read (408 after 30 s); a target Foundation cannot parse answers 400 rather than 502; and the id-less
+    dedupe fallback rounds its instant to the second so a repeated response actually dedupes. The
+    reviewer's weakest-evidence item — the `Accept-Encoding: identity` assumption — was checked
+    dynamically against the live API: a client asking for gzip/br got plain JSON with no `Content-Encoding`
+    header. The gate was strengthened with the reviewer's own suggestions (loopback-only `lsof`, model id,
+    exact micro-USD cost, `cache_write`, absolute-form → 400, chunked → 501).
   - **Known limitation, documented in `USAGE.md`:** there is no cross-source dedupe. A client that is both
     imported (opencode's database) and proxied lands **two rows** per call, so the rule is one path per
     client: leave opencode on its direct connection, point unimportable clients (pi, scripts) at the proxy.
@@ -480,3 +492,4 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 6.5 | **Course correction at the user's direction.** The popover showed `$0.00` today while the user was spending DeepSeek credits through pi, because the only local source was opencode's database (nothing since 2026-08-29). A pi-session importer was started and **stopped mid-build**: a per-harness importer binds the ledger to one client. A live API check (docs + probe + an open feature request) confirmed **DeepSeek has no usage or spend endpoint** — only `/user/balance` and the per-response `usage` field — so decision 9's proxy capture moved forward from v1.1: opt-in, binds 127.0.0.1 only, forwards to api.deepseek.com only, records counters and never keys or content. |
 | 2026-09-26 | 6.5 | Reader merged (`2994455`): `ProxyUsageReader` for JSON bodies and SSE streams, chunk-safe and bounded memory, 11 tests. A live capture proved the usage chunk arrives even without `stream_options.include_usage` (so the proxy never rewrites a request) and gave the exact token mapping: the API's `completion_tokens` **includes** reasoning, which the ledger stores separately and bills as output. |
 | 2026-09-26 | 6.5 | App server and docs merged (`f00ffe9`, `68df0ba`): NWListener with origin-form-only forwarding and explicit 400/501/502 refusals, settings toggle (off by default) plus port stepper, one ledger row per completion with `source: .proxy`, headless `--spike proxy`. 396 tests. **Live gate passed:** a streaming and a non-streaming completion with the real key landed two rows (`input 37 · output 0 · reasoning 4 · cache_read 0 · 8 µUSD` each, exactly the responses' own numbers), `deeptally usage --json` reported spend `0.000016` with 2 requests, and `lsof` showed `127.0.0.1` only. Docs lane flagged the gap the parent then documented: **no cross-source dedupe** — a client that is both imported and proxied double counts, so the rule is one path per client (opencode stays on its import; pi and scripts use the proxy). |
+| 2026-09-26 | 6.5 | Independent read-only review of the proxy: **no P0/P1**, seven P2s all closed — request-side hop-by-hop headers per RFC 7230 §6.1, a 32-connection cap and a 30-second idle-read timeout, 400 instead of 502 for an unparseable target, second-rounded id-less dedupe, a stale caption on a port change, and two documentation mismatches. The reviewer's weakest assumption (`Accept-Encoding: identity` with the header dropped) was verified against the live API; the gate gained loopback-only and refusal assertions (absolute-form → 400, chunked → 501). 396 tests, gate re-run green. |

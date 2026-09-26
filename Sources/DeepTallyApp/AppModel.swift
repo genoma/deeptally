@@ -654,6 +654,9 @@ final class AppModel {
     let server = proxy ?? makeProxyServer()
     proxy = server
     proxyProblem = nil
+    // A port change rebinds: the old port is closed until the new bind lands, so the caption must not
+    // keep naming it (it would contradict the listener that is actually in service).
+    proxyBoundPort = nil
     Task { [weak self] in
       let outcome = await server.start(port: port)
       guard let self, generation == self.proxyGeneration else { return }

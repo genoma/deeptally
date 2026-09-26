@@ -63,10 +63,11 @@ and the app's menu-bar metrics. Both ask the ledger for a `ts` range built from 
 is the split the next section explains. The app runs one import pass at launch and every fifteen minutes
 (`LocalUsageLedger`, an actor, so neither the SQLite work nor a full scan of a large database reaches the
 main actor); the CLI imports on demand. Both use the same `LedgerSync` flow, so "what happens if I import
-twice?" has one answer in one place. The loopback proxy is a second producer into the same flow: while it
+twice?" has one answer in one place. The loopback proxy is a second producer beside that flow: while it
 is on it forwards a client's requests to `api.deepseek.com`, `ProxyUsageReader` taps the response's `usage`
-object, and `LedgerSync` writes one row per completion with `source: proxy`, priced by the same `CostEngine`
-as every other row.
+object, and `LocalUsageLedger.record` writes one row per completion with `source: proxy`, priced by the same
+`CostEngine` as every other row. (`LedgerSync` is the import flow; a proxied completion does not go through
+it.)
 
 ## Menu bar and lifecycle
 

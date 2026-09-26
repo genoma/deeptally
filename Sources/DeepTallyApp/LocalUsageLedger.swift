@@ -180,8 +180,11 @@ actor LocalUsageLedger {
   /// **With no price table nothing is recorded.** An unreadable table prices every model at zero and
   /// a row's cost travels with it forever, so a stored row would be a permanent $0 — the same reason
   /// ``refresh(now:calendar:)`` imports nothing without a table. Dropping the row costs this one
-  /// request's counters; writing a cost that is wrong would corrupt the spend. A model the *table*
-  /// cannot price is a different case and is stored at zero, exactly as the importer stores it, and
+  /// request's counters; writing a cost that is wrong would corrupt the spend. This is harsher than
+  /// the importer's skip: an import's watermark does not move, so those rows return once the table is
+  /// back, while a proxied request is gone. It is reachable only when the bundled table itself fails to
+  /// load, which is a broken installation rather than a transient state. A model the *table* cannot
+  /// price is a different case and is stored at zero, exactly as the importer stores it, and
   /// ``ledgerPricingNote(_:)`` names it on the next pass.
   ///
   /// The menu-bar metrics and the analytics panel are re-read in the same call after a successful
@@ -235,7 +238,9 @@ actor LocalUsageLedger {
     let identity =
       usage.responseID
       ?? [
-        "\(usage.recordedAt.timeIntervalSince1970)", usage.model,
+        // Seconds, not the full Double: a client that repeats an id-less response writes a different
+        // microsecond every time, so a sub-second instant would make the fallback dedupe nothing.
+        "\(Int(usage.recordedAt.timeIntervalSince1970.rounded()))", usage.model,
         "\(usage.usage.promptTokens):\(usage.usage.completionTokens)",
         "\(usage.usage.cacheHitTokens):\(usage.usage.cacheMissTokens):\(usage.usage.reasoningTokens)",
       ].joined(separator: "\u{1F}")
