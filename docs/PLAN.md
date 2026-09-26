@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Steps 4, 5 and 6.5 reverted by owner decision (API-only); Step 6.6 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
+**Status:** Steps 4, 5 and 6.5 reverted by owner decision (API-only); Steps 6.6 and 6.7 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -438,6 +438,61 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Gate:** `make verify` green ✅ · popover renders balance and rate only ✅ · `deeptally usage` fails cleanly ✅ ·
   no source or doc reference to a deleted feature ✅
 
+### Step 6.7 — Balance refresh policy
+**Status:** complete — implemented 2026-09-26 (parent work, after three research lanes and an independent evidence audit; no implementation lanes because the change is one seam)
+
+> **Why.** The app refreshed on a blind fixed timer (default 20 minutes) and never when the popover opened,
+> so the number the user actually looked at could be arbitrarily old while nothing ever asked whether the
+> balance had changed. Three research lanes and an evidence audit (2026-09-26) settled the question: there is
+> **no change signal reachable with an API key**. The API surface is nine operations with no usage/webhook/event
+> endpoint; the full changelog has no such announcement; the live `/user/balance` response carries no
+> `ETag`/`Last-Modified`/`Cache-Control` (so conditional GET is impossible) and no timestamp or revision in the
+> body; the console usage endpoints need a browser session token, not `sk-`. Poll-and-compare is the only
+> mechanism, so the correct design is **user intent first, events as recovery, and a deferrable backstop** — not
+> a faster timer. The audit confirmed the DeepSeek negative and downgraded two overstatements: the
+> "ingestion delay" is a single contradictory third-party claim, and the console-endpoint report is not
+> authored by DeepSeek. The three briefs and the independent audit are committed under
+> [`research/2026-09-26-refresh/`](research/2026-09-26-refresh/README.md).
+
+- [x] `RefreshPolicy` (core, pure): power-aware backstop (the user's interval on the adapter, at least an hour
+      on battery or in Low Power Mode, never narrowed), stale window = 2× the effective interval, tolerance
+      ≥10% with a 30 s floor, and per-trigger freshness windows (60 s user intent, 300 s recovery)
+- [x] `AppScheduling` carries a tolerance per refresh; the shipping scheduler is a one-shot wall-clock
+      `DispatchSourceTimer` with explicit `leeway` (documented sleep and early-fire semantics) instead of a
+      run-loop `Timer`, re-armed every cycle
+- [x] `PowerStateProviding` + `SystemPowerState`: IOKit power sources for battery ⇄ adapter, Foundation's
+      `isLowPowerModeEnabled` via `NSProcessInfoPowerStateDidChange`; the 30 s tick notices a source change
+      because no supported Foundation notification exists for it
+- [x] `AppModel` trigger classes: popover-open fetch-if-stale, recovery checks on wake / display wake / session
+      switch-in / network return / power change (a failed attempt always retries), clock change re-derives the
+      age and deadline without fetching, per-install jitter drawn once and persisted
+- [x] `StatusItemController` refreshes on presentation, before the popover shows, without blocking it
+- [x] Default interval 30 minutes; the 5–240 range is unchanged (owner decision)
+- [x] Docs (`USAGE`, `ARCHITECTURE`, `CHANGELOG`) updated to the real behaviour
+
+  **Gate evidence (2026-09-26, all observed):**
+  - `make verify` green: build, 209 tests (152 core + 6 CLI + 51 app), lint, bundle, `codesign --verify`.
+  - **Live header probe (parent, 2026-09-26):** `GET /user/balance` → 200 with `content-type`, `date`,
+    `server: elb`, `x-ds-trace-id`, `x-cache: Miss from cloudfront`; **no** `ETag`, `Last-Modified`,
+    `Cache-Control`, `Expires`, `X-RateLimit-*` or `Retry-After`; an `If-None-Match` round trip is impossible
+    because no validator exists. This is the artifact the audit named as the most valuable missing one.
+  - **Trigger behaviour is pinned by tests:** `presentationRefreshRespectsFreshness` (opening twice inside a
+    minute shares one request; 61 s later it fetches), `recoveryFreshnessAndFailureRetry` (4 minutes is a
+    no-op, 5 minutes fetches, a failed attempt always retries), `inflightRequestSatisfiesPresentationTrigger`
+    (an in-flight request satisfies a look instead of stacking), `backstopFollowsPowerState` (30 min/180 s on
+    the adapter, ≥1 h/≥360 s on battery and LPM), `tickNoticesPowerChange` (a power change is noticed within
+    one tick and the stale window follows), `persistedJitterFractionIsStable`.
+  - **Known limits, tracked rather than hidden:** the specific intervals are judgment (Apple publishes no
+    recommended poll cadence for a user-visible value); the "an `LSUIElement` app is App-Napped, so its timer
+    may be deferred" premise is plausible but not Apple-documented — the design does not depend on the timer
+    firing on time, which is why the timer is explicitly a backstop; the endpoint's consistency lag is
+    unmeasured, so no real-time freshness is claimed and the "as of" time remains the honest boundary;
+    `NSBackgroundActivityScheduler` was considered and rejected as the freshness mechanism (symmetric
+    tolerance window, long deferral) though it remains a legitimate optional backstop.
+  **Gate:** `make verify` green ✅ · opening the popover refreshes a stale reading ✅ (pinned by test) ·
+  battery/LPM widen the backstop and the stale window ✅ (pinned by test) · a failed attempt retries on a
+  recovery event ✅ (pinned by test)
+
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
 - [ ] `docs/PLAN.md` closed out with the release link
@@ -509,6 +564,7 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | A partly covered UTC day (Step 5) | **named as unavailable only when `daily` holds rows for it**; a day with nothing in either store contributes nothing and is not listed — a note about a day with no usage would read as missing data |
 | New JSON keys (Step 5) | **snake_case** (`rollup_days`, `unavailable_days`), like every other multiword key in the `usage` document |
 | API-only product (2026-09-26) | **Balance, rates, key and settings only.** Everything that needs local capture is deleted: the ledger, the opencode importer, the loopback proxy, the analytics panel, CSV import/export, reprice, the `usage`/`import`/`ledger` CLI commands and `DEEPTALLY_LEDGER`. Rationale and evidence: [`COUNCIL-2026-09-26.md`](COUNCIL-2026-09-26.md) |
+| Balance refresh (Step 6.7, 2026-09-26) | **User intent first, events as recovery, deferrable backstop.** Opening the popover fetches when the reading is >60 s old; wake/display-wake/session/network/power are checks bounded by 300 s with a forced retry after a failure; the one-shot wall-clock timer is the backstop, widened to ≥1 h on battery or Low Power Mode, with tolerance ≥10%; stale = 2× the effective interval; default 30 min, range 5–240. DeepSeek has no change signal reachable with an API key, so poll-and-compare is the only mechanism and Apple's guidance is to respond to events rather than poll. Research and audit: [`research/2026-09-26-refresh/`](research/2026-09-26-refresh/README.md) |
 | Pointing the CLI at another ledger (Step 5) | **`DEEPTALLY_LEDGER=<path>`**: `HOME` does not redirect application support, so this is the one safe way to try `ledger prune`/`ledger reprice` on a copy. It exists because a gate script of mine got this wrong and pruned the real ledger (see the log) |
 | Release tamper-protection (Step 6) | **Immutable Releases enabled** on the repository (`PUT /immutable-releases`, verified `enabled: true`): a published tag and its assets cannot be edited or deleted, so a bad release gets the next patch version, never a re-upload |
 | Uninstaller ownership (Step 6) | **The Swift `Uninstaller` owns the removal list**; `Scripts/uninstall.sh` execs `DeepTally --uninstall`, so the popover button and the script cannot drift. `--keep-login-item`/`--keep-keychain` exist so the release gate never touches the machine that runs it |
@@ -556,3 +612,5 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 6.6 | Independent read-only review of the reduction: **no P0/P1**; it walked balance, alerts, key precedence, rate, settings, login item and uninstaller and found nothing removed that they need. Four P2s closed in `0d4d887`: dead API members deleted, the CLI surface covered by tests, stale user-visible text fixed (formula description, uninstaller help, the README hero tagline regenerated), and the docs list passed to the rewrite lane. |
 | 2026-09-26 | 6.6 | Docs rewritten for the smaller product (`a7fcaee`, 10 files, 128 relative links checked, every CLI example pasted from the shipped binary) and the popover screenshots regenerated from the API-only build; the now-unused settings image was deleted. **Step 6.6 closed.** The app is a balance and rate meter: it cannot show spend history because DeepSeek has no usage endpoint, and it no longer pretends otherwise. |
 | 2026-09-26 | 6.6 | **Old ledger removed at the owner's request:** `ledger.sqlite` plus its sidecars deleted (5,275 rows of history, the last copy), and the remaining code and doc notes about a legacy ledger removed with them — the app-support directory now holds only launch diagnostics. No other user data was touched. |
+| 2026-09-26 | 6.7 | **Refresh policy reworked.** The owner asked for the most correct refresh behaviour, not the cheapest, and researchers were sent: three lanes (DeepSeek server-side detection, macOS platform design, precedent + change semantics) plus an independent evidence auditor. Verdict: no API-key-reachable change signal exists (nine operations, no webhook/usage endpoint, no `ETag`/`Last-Modified`/`Cache-Control` on `/user/balance` — live probe — and no timestamp in the body), so poll-and-compare is the only mechanism and the correct shape is user intent + event recovery + a deferrable backstop. Implemented as `RefreshPolicy` (core) with `PowerStateProviding` and a wall-clock dispatch timer behind `AppScheduling`: popover-open fetch-if-stale, wake/display/session/network/power recovery checks, battery/LPM backstop ≥1 h, stale window 2× the effective interval, persisted per-install jitter, default 30 min. 197 → 209 tests; docs and the three briefs plus the audit committed under
+`docs/research/2026-09-26-refresh/`. Known limit: the interval numbers are judgment, and the App-Nap premise is inferred — the design does not depend on the timer firing on time. |

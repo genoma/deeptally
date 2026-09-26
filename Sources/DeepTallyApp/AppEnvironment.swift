@@ -111,10 +111,11 @@ struct AppEnvironment: Sendable {
       table: table, engine: costEngine.peakOffPeak, timeZone: timeZone)
   }
 
-  /// The balance monitor for one threshold. The stale-after window is app policy, the threshold is a
-  /// user setting, so this is rebuilt when the setting changes instead of capturing the old value.
-  func balanceMonitor(lowBalanceThreshold: Decimal) -> BalanceMonitor {
-    BalanceMonitor(lowBalanceThreshold: lowBalanceThreshold)
+  /// The balance monitor for one threshold and one cadence. Both are policy inputs — the threshold
+  /// from the user, the stale-after window from ``RefreshPolicy`` and the current power state — so the
+  /// monitor is rebuilt when either changes instead of capturing the old value.
+  func balanceMonitor(lowBalanceThreshold: Decimal, staleAfter: TimeInterval) -> BalanceMonitor {
+    BalanceMonitor(lowBalanceThreshold: lowBalanceThreshold, staleAfter: staleAfter)
   }
 
   /// The alert policy for one cooldown, for the same reason as ``balanceMonitor(lowBalanceThreshold:)``.
@@ -194,4 +195,20 @@ struct LaunchStateStore: Sendable {
   func saveLastNotified(_ date: Date) {
     defaults.set(date.timeIntervalSince1970, forKey: Self.notifiedKey)
   }
+
+  /// The install's jitter offset: a fraction in `0...1`, drawn once and then persisted so every poll
+  /// from this install carries the same offset instead of re-rolling at each tick. A stored value
+  /// outside the range (a hand-edited preference) is replaced rather than trusted.
+  func persistedJitterFraction() -> Double {
+    if let stored = defaults.object(forKey: Self.jitterKey) as? Double,
+      stored >= 0, stored <= 1
+    {
+      return stored
+    }
+    let drawn = Double.random(in: 0...1)
+    defaults.set(drawn, forKey: Self.jitterKey)
+    return drawn
+  }
+
+  private static let jitterKey = "io.github.genoma.deeptally.jitter-fraction"
 }

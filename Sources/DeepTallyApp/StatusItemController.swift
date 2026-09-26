@@ -60,6 +60,9 @@ final class StatusItemController {
 
   private func showPopover() {
     guard let button = statusItem.button else { return }
+    // The user is looking: refresh unless the reading is already current. This runs before the popover
+    // shows so the request is in flight while the panel renders, and it never blocks presentation.
+    model.refreshOnPresentation()
     popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
     popover.contentViewController?.view.window?.makeKey()
     NSApp.activate(ignoringOtherApps: true)

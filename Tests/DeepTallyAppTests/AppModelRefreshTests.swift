@@ -100,9 +100,9 @@ struct AppModelRefreshTests {
         defaults: defaults, outcome: .failure(.transport("offline")))
       let model = fixture.model
 
-      // The default interval is 20 minutes; `PollingPlan` doubles the wait per failed attempt and caps
-      // it at an hour, so even the first failure already waits twice the interval.
-      for expected in [2400.0, 3600.0, 3600.0, 3600.0] {
+      // The default interval is 30 minutes; `PollingPlan` doubles the wait per failed attempt and caps
+      // it at an hour, so even the first failure already waits the capped hour.
+      for expected in [3600.0, 3600.0, 3600.0, 3600.0] {
         model.refresh()
         await settleRefresh(model)
         #expect(fixture.scheduling.lastRefreshDelay == expected)
@@ -112,8 +112,8 @@ struct AppModelRefreshTests {
       fixture.fetcher.setOutcome(.balance(usdBalance("12.34")))
       model.refresh()
       await settleRefresh(model)
-      #expect(fixture.scheduling.lastRefreshDelay == 1200)
-      #expect(fixture.scheduling.refreshDelays == [2400, 3600, 3600, 3600, 1200])
+      #expect(fixture.scheduling.lastRefreshDelay == 1800)
+      #expect(fixture.scheduling.refreshDelays == [3600, 3600, 3600, 3600, 1800])
 
       // And the callback the model handed over is the one that refreshes.
       fixture.scheduling.fireScheduledRefresh()

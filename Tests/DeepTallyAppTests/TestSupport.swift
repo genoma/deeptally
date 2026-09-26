@@ -53,15 +53,21 @@ final class TestClock {
 final class TestScheduler: AppScheduling {
   /// Every delay the model asked for, oldest first.
   private(set) var refreshDelays: [TimeInterval] = []
+  /// Every tolerance that came with a delay, oldest first.
+  private(set) var refreshTolerances: [TimeInterval] = []
   private(set) var tickerInterval: TimeInterval?
   private(set) var cancels = 0
   private var refreshRun: (@MainActor () -> Void)?
   private var tickRun: (@MainActor () -> Void)?
 
   var lastRefreshDelay: TimeInterval? { refreshDelays.last }
+  var lastRefreshTolerance: TimeInterval? { refreshTolerances.last }
 
-  func scheduleRefresh(after delay: TimeInterval, _ run: @escaping @MainActor () -> Void) {
+  func scheduleRefresh(
+    after delay: TimeInterval, tolerance: TimeInterval, _ run: @escaping @MainActor () -> Void
+  ) {
     refreshDelays.append(delay)
+    refreshTolerances.append(tolerance)
     refreshRun = run
   }
 
@@ -85,6 +91,14 @@ final class TestScheduler: AppScheduling {
   func fireTick() {
     tickRun?()
   }
+}
+
+/// The power source as a test double: the backstop's battery behaviour must not depend on whether the
+/// machine running the suite is plugged in.
+@MainActor
+final class StubPowerState: PowerStateProviding {
+  var isOnBattery = false
+  var isLowPowerMode = false
 }
 
 // MARK: - Network
@@ -317,6 +331,7 @@ struct AppModelFixture {
   let alerts: StubAlertScheduler
   let clock: TestClock
   let loginItem: LoginItemStub
+  let power: StubPowerState
 }
 
 /// Builds the model a test drives.
@@ -334,6 +349,7 @@ func makeFixture(
   outcome: StubBalanceFetcher.Outcome = .balance(usdBalance("12.34")),
   key: APIKeySource = testKeySource(.environment(testEnvironmentKey)),
   settings: AppSettings = .default,
+  power: StubPowerState = StubPowerState(),
   uninstaller: Uninstaller? = nil
 ) -> AppModelFixture {
   SettingsStore(defaults: defaults).save(settings)
@@ -359,6 +375,7 @@ func makeFixture(
     scheduler: alerts,
     scheduling: scheduling,
     loginItem: loginItem.control,
+    power: power,
     now: { clock.now },
     // Jitter is real runtime behaviour, not the model's arithmetic: pinned to zero so a recorded
     // delay is exactly `PollingPlan`'s backoff.
@@ -367,7 +384,7 @@ func makeFixture(
   )
   return AppModelFixture(
     model: model, fetcher: fetcher, scheduling: scheduling, alerts: alerts, clock: clock,
-    loginItem: loginItem)
+    loginItem: loginItem, power: power)
 }
 
 // MARK: - Waiting

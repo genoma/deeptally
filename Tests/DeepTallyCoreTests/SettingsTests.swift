@@ -32,7 +32,7 @@ struct SettingsTests {
   @Test("the documented defaults")
   func documentedDefaults() {
     let settings = AppSettings.default
-    #expect(settings.refreshIntervalMinutes == 20)
+    #expect(settings.refreshIntervalMinutes == 30)
     #expect(settings.lowBalanceThreshold == 2)
     #expect(settings.notificationsEnabled)
     #expect(settings.notificationCooldownMinutes == 720)
@@ -145,7 +145,7 @@ struct SettingsTests {
 
       let loaded = SettingsStore(defaults: defaults).load()
 
-      #expect(loaded.refreshIntervalMinutes == 20)
+      #expect(loaded.refreshIntervalMinutes == 30)
       #expect(!loaded.notificationsEnabled)
     }
   }

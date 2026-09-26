@@ -91,11 +91,17 @@ fresh object instead of an object holding the old value.
 problem that resolution reported*, the balance state, the rate-now display, the login-item status and the
 banner list derived from all of them. Three rules it keeps: a refresh never runs twice at once — a request
 that arrives while one is in flight is *queued*, not dropped, which is what makes "press Import and a refresh
-follows shortly" true; the next refresh always comes from `PollingPlan` (interval, then backoff, then additive
-jitter) rather than a hand-rolled timer chain; nothing blocking runs on the main actor (the one blocking kind
+follows shortly" true; the next refresh always comes from `RefreshPolicy` and `PollingPlan` (the cadence for
+the current power state, then backoff, then the install's persisted jitter offset) rather than a hand-rolled
+timer chain; nothing blocking runs on the main actor (the one blocking kind
 of work — the key import's shell — runs in a detached task). It re-renders the countdown on a 30-second
-ticker, refreshes on `NSWorkspace.didWakeNotification` and on the unsatisfied → satisfied edge of
-`NWPathMonitor`, and posts low-balance alerts through `NotificationPolicy` — stamping the cooldown only once
+ticker. Refreshes are trigger-classed: opening the popover is the user looking, so it fetches unless the
+reading is younger than a minute; wake, display-wake, a returning user session, a returning network and a
+power-state change are recovery checks bounded by five minutes, and a failed attempt always retries; the
+wall-clock dispatch-timer backstop runs at the user's interval on the adapter and at least an hour on battery
+or in Low Power Mode, with a tolerance of at least 10% so macOS can coalesce the wake-up. A clock change
+re-derives the age text and the deadline and fetches nothing. It posts low-balance alerts through
+`NotificationPolicy` — stamping the cooldown only once
 macOS accepted the post, so a denial or a failed post is retried rather than silencing the alert. While macOS
 will not deliver, the menu bar carries a warning glyph instead.
 

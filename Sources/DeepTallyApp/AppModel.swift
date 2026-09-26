@@ -9,8 +9,9 @@ import Observation
 /// rate-now display, the settings and the notices the popover shows.
 ///
 /// Three rules this type exists to keep:
-/// - a refresh never runs twice at once, and the next one always comes from `PollingPlan`
-///   (interval, then backoff, then jitter) rather than from a hand-rolled timer chain;
+/// - a refresh never runs twice at once, and the next one always comes from `RefreshPolicy` and
+///   `PollingPlan` (the cadence for the current power state, then backoff, then the install's persisted
+///   jitter offset) rather than from a hand-rolled timer chain;
 /// - nothing blocking runs on the main actor: importing a key is the one blocking kind of work in
 ///   the app and it runs off it;
 /// - the API key leaves the Keychain only as the `Bearer` argument of one request. It is never
@@ -77,9 +78,13 @@ final class AppModel {
   /// Injection seam: the wall clock. The app reads `Date()`; a test moves it, so "stale after an
   /// hour" and "the cooldown has elapsed" are assertions rather than waits.
   private let now: @MainActor () -> Date
-  /// Injection seam: the fraction `PollingPlan` scales its additive jitter by. The app draws it from
-  /// system randomness; a test pins it to 0, which makes the recorded delay exactly the backoff.
+  /// Injection seam: the fraction `PollingPlan` scales its additive jitter by. The app uses one value
+  /// drawn once per install and persisted, so polls share the same offset instead of re-randomising on
+  /// every tick; a test pins it to 0, which makes the recorded delay exactly the backoff.
   private let jitterFraction: @MainActor () -> Double
+  /// Injection seam: the power source. "On battery the backstop widens" must not depend on whether the
+  /// machine running the tests happens to be plugged in. See ``PowerStateProviding``.
+  private let power: any PowerStateProviding
 
   /// The last successful reading and when it arrived. Seeded from `UserDefaults` at launch so the
   /// popover has something true to show before the first fetch returns.
@@ -96,7 +101,12 @@ final class AppModel {
   /// Set when `refresh()` arrives while a request is in flight; the next run starts when the
   /// current one finishes, so no caller's refresh is silently dropped.
   private var needsRefreshAgain = false
-  private var wakeTask: Task<Void, Never>?
+  /// Tokens for the workspace observers (wake, display wake, session switch) and the default-centre
+  /// observers (clock change, Low Power Mode). All are removed in ``stop()``.
+  private var workspaceObservers: [any NSObjectProtocol] = []
+  private var systemObservers: [any NSObjectProtocol] = []
+  /// The power state the ticker saw last, so a battery ⇄ adapter change is noticed within one tick.
+  private var lastPowerSignature: (battery: Bool, lowPowerMode: Bool)?
   private let pathMonitor = NWPathMonitor()
   /// `nil` until the first path update arrives, so the initial "we have a path" report is not mistaken
   /// for a network coming back.
@@ -111,22 +121,34 @@ final class AppModel {
     scheduler: any LowBalanceAlerting = UserNotificationScheduler(),
     scheduling: any AppScheduling = TaskAppScheduler(),
     loginItem: LoginItemControl = .system,
+    power: any PowerStateProviding = SystemPowerState(),
     now: @escaping @MainActor () -> Date = { Date() },
-    jitterFraction: @escaping @MainActor () -> Double = { Double.random(in: 0...1) },
+    jitterFraction: (@MainActor () -> Double)? = nil,
     uninstaller: Uninstaller? = nil
   ) {
     self.environment = environment
     self.scheduler = scheduler
     self.scheduling = scheduling
     self.loginItem = loginItem
+    self.power = power
     self.now = now
-    self.jitterFraction = jitterFraction
+    self.jitterFraction =
+      jitterFraction ?? { environment.launchState.persistedJitterFraction() }
     self.uninstaller =
       uninstaller
       ?? Uninstaller.shipping(loginItem: loginItem, keychain: environment.keychain)
     let settings = environment.settingsStore.load()
     self.settings = settings
-    self.monitor = environment.balanceMonitor(lowBalanceThreshold: settings.lowBalanceThreshold)
+    let backstop = RefreshPolicy.backstopInterval(
+      base: TimeInterval(settings.refreshIntervalMinutes) * 60,
+      isOnBattery: power.isOnBattery,
+      isLowPowerMode: power.isLowPowerMode)
+    self.monitor = environment.balanceMonitor(
+      lowBalanceThreshold: settings.lowBalanceThreshold,
+      staleAfter: RefreshPolicy.staleAfter(backstopInterval: backstop))
+    // The ticker compares against this to notice a battery ⇄ adapter change, so the launch state is
+    // the baseline rather than “unknown”.
+    self.lastPowerSignature = (battery: power.isOnBattery, lowPowerMode: power.isLowPowerMode)
     self.notificationPolicy = environment.notificationPolicy(
       cooldownMinutes: settings.notificationCooldownMinutes)
   }
@@ -147,8 +169,10 @@ final class AppModel {
     seedFromStoredReading()
     updateRateNow()
     if observingSystemEvents {
-      installWakeObserver()
+      installWorkspaceObservers()
       installNetworkObserver()
+      installClockObserver()
+      installPowerObservers()
     }
     startTicker()
     if settings.notificationsEnabled {
@@ -160,7 +184,12 @@ final class AppModel {
   /// Releases the observers and the timers while AppKit tears the process down.
   func stop() {
     scheduling.cancel()
-    wakeTask?.cancel()
+    for token in workspaceObservers {
+      NSWorkspace.shared.notificationCenter.removeObserver(token)
+    }
+    workspaceObservers.removeAll()
+    for token in systemObservers { NotificationCenter.default.removeObserver(token) }
+    systemObservers.removeAll()
     pathMonitor.cancel()
   }
 
@@ -176,6 +205,27 @@ final class AppModel {
     }
     isRefreshing = true
     Task { await performRefresh() }
+  }
+
+  /// Fetch-if-stale for the triggers the user did not ask for. A failed last attempt always retries:
+  /// a wake or a returning network is exactly when a retry is cheapest and most likely to succeed.
+  /// A request already in flight satisfies every trigger: it is seconds old by definition, and the
+  /// events that arrive together (wake, display wake, network return) must not stack requests on top
+  /// of it.
+  func refreshIfStale(_ trigger: RefreshTrigger) {
+    guard !isRefreshing else { return }
+    let freshness = RefreshPolicy.freshnessWindow(for: trigger)
+    let age = lastSuccess.map { now().timeIntervalSince($0) } ?? .infinity
+    guard consecutiveFailures > 0 || age > freshness else { return }
+    refresh()
+  }
+
+  /// The popover's presentation point: opening the panel is the user looking, so the number they are
+  /// about to read is refreshed unless it is already current. Called by the status item before the
+  /// popover shows; it never blocks presentation, so a failure leaves the cached reading and its
+  /// honest age on screen.
+  func refreshOnPresentation() {
+    refreshIfStale(.userIntent)
   }
 
   private func performRefresh() async {
@@ -255,35 +305,101 @@ final class AppModel {
 
   // MARK: - Scheduling
 
-  /// Arms the next refresh from `PollingPlan`: the configured interval, doubled per consecutive
-  /// failure and capped, plus additive jitter so many installs do not poll in lockstep. The delay is
-  /// handed to ``AppScheduling``, which is where a test reads it back.
+  /// Arms the next backstop from ``RefreshPolicy`` and ``PollingPlan``: the cadence for the current
+  /// power state, doubled per consecutive failure and capped, plus the install's own jitter offset so
+  /// many installs do not poll in lockstep. The delay and its tolerance are handed to
+  /// ``AppScheduling``, which is where a test reads them back.
   private func scheduleNextRefresh() {
-    let plan = PollingPlan(interval: TimeInterval(settings.refreshIntervalMinutes) * 60)
+    let interval = effectiveBackstopInterval
+    let plan = PollingPlan(interval: interval)
     let instant = now()
     let next = plan.nextRefresh(
       after: instant, attempt: consecutiveFailures, jitterFraction: jitterFraction())
     let delay = max(1, next.timeIntervalSince(instant))
-    scheduling.scheduleRefresh(after: delay) { [weak self] in self?.refresh() }
+    scheduling.scheduleRefresh(
+      after: delay, tolerance: RefreshPolicy.tolerance(backstopInterval: interval)
+    ) { [weak self] in self?.refresh() }
   }
 
-  /// A wake is the moment the schedule is definitely wrong: the machine was asleep through it, so
-  /// refresh now instead of waiting out an interval that was measured against a stopped clock.
-  private func installWakeObserver() {
-    wakeTask?.cancel()
-    wakeTask = Task { [weak self] in
-      let notifications = NSWorkspace.shared.notificationCenter.notifications(
-        named: NSWorkspace.didWakeNotification)
-      for await _ in notifications {
-        guard let self, !Task.isCancelled else { return }
-        self.refresh()
+  /// The backstop cadence for the current setting and power state. The user's interval is the baseline;
+  /// battery and Low Power Mode widen it to at least an hour, never narrow it.
+  private var effectiveBackstopInterval: TimeInterval {
+    RefreshPolicy.backstopInterval(
+      base: TimeInterval(settings.refreshIntervalMinutes) * 60,
+      isOnBattery: power.isOnBattery,
+      isLowPowerMode: power.isLowPowerMode)
+  }
+
+  /// Rebuilds the monitor for the current threshold and cadence. Both inputs are live state, so the
+  /// stale window follows the interval and the power state instead of being a constant.
+  private func rebuildMonitor() {
+    let staleAfter = RefreshPolicy.staleAfter(backstopInterval: effectiveBackstopInterval)
+    guard
+      staleAfter != monitor.staleAfter
+        || settings.lowBalanceThreshold != monitor.lowBalanceThreshold
+    else { return }
+    monitor = environment.balanceMonitor(
+      lowBalanceThreshold: settings.lowBalanceThreshold, staleAfter: staleAfter)
+  }
+
+  /// Wake, display wake and a returning user session are all "the schedule may be wrong" events: the
+  /// machine may have slept through the backstop, and the reading is probably older than the user
+  /// thinks. Each is a fetch-if-stale, so the cluster of events around a wake causes one request.
+  private func installWorkspaceObservers() {
+    let center = NSWorkspace.shared.notificationCenter
+    let names: [NSNotification.Name] = [
+      NSWorkspace.didWakeNotification,
+      NSWorkspace.screensDidWakeNotification,
+      NSWorkspace.sessionDidBecomeActiveNotification,
+    ]
+    for name in names {
+      let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        MainActor.assumeIsolated { self?.refreshIfStale(.recovery) }
       }
+      workspaceObservers.append(token)
     }
   }
 
+  /// A clock change is not new data: it invalidates the age text and the deadline, so the app
+  /// recomputes both and fetches nothing. Wall-clock arming means the deadline was already measured
+  /// against the clock the user just changed.
+  private func installClockObserver() {
+    let token = NotificationCenter.default.addObserver(
+      forName: .NSSystemClockDidChange, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        self.evaluate()
+        self.scheduleNextRefresh()
+      }
+    }
+    systemObservers.append(token)
+  }
+
+  /// Entering Low Power Mode widens the backstop; leaving it restores the user's cadence. The reading
+  /// itself is not invalidated, so this is a fetch-if-stale, not a fetch.
+  private func installPowerObservers() {
+    let token = NotificationCenter.default.addObserver(
+      forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.powerStateDidChange() }
+    }
+    systemObservers.append(token)
+  }
+
+  /// The power state changed (Low Power Mode notification, or the ticker noticing a battery ⇄ adapter
+  /// change): the stale window and the backstop both follow the new state, and a reading that the new
+  /// cadence considers stale is refreshed now.
+  private func powerStateDidChange() {
+    rebuildMonitor()
+    evaluate()
+    scheduleNextRefresh()
+    refreshIfStale(.recovery)
+  }
+
   /// `NWPathMonitor` reports the path the machine has, not whether DeepSeek is reachable, so a
-  /// refresh happens on the unsatisfied → satisfied edge only: a monitor that polls on every callback
-  /// is a second poll loop nobody asked for.
+  /// refresh happens on the unsatisfied → satisfied edge only, and only as a recovery check: a monitor
+  /// that polls on every callback is a second poll loop nobody asked for.
   private func installNetworkObserver() {
     pathMonitor.pathUpdateHandler = { [weak self] path in
       let available = path.status == .satisfied
@@ -292,7 +408,7 @@ final class AppModel {
         let wasAvailable = self.networkWasAvailable
         self.networkWasAvailable = available
         guard available, wasAvailable == false else { return }
-        self.refresh()
+        self.refreshIfStale(.recovery)
       }
     }
     pathMonitor.start(
@@ -301,12 +417,20 @@ final class AppModel {
 
   /// The 30-second ticker. The balance state is `BalanceMonitor.evaluate`'s business and that is
   /// pure, so the tick can keep the age text, the stale flag and the login-item status truthful
-  /// between refreshes — the maximum cadence is four hours, far past the one-hour stale window. It
-  /// never fetches and never notifies.
+  /// between refreshes — the maximum cadence is four hours, far past every stale window. It never
+  /// fetches and never notifies; its one active duty is noticing a power-source change, because there
+  /// is no notification for battery ⇄ adapter on a supported Foundation API.
   private func tick() {
     updateRateNow()
-    evaluate()
     refreshLoginItemStatus()
+    let signature = (battery: power.isOnBattery, lowPowerMode: power.isLowPowerMode)
+    let previous = lastPowerSignature
+    lastPowerSignature = signature
+    if let previous, previous != signature {
+      powerStateDidChange()
+    } else {
+      evaluate()
+    }
   }
 
   private func startTicker() {
@@ -515,7 +639,7 @@ final class AppModel {
       settings = validated
     }
     environment.settingsStore.save(validated)
-    monitor = environment.balanceMonitor(lowBalanceThreshold: validated.lowBalanceThreshold)
+    rebuildMonitor()
     notificationPolicy = environment.notificationPolicy(
       cooldownMinutes: validated.notificationCooldownMinutes)
     evaluate()

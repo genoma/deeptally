@@ -22,6 +22,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The balance refresh policy is event-driven with a deferrable backstop.** Opening the popover fetches
+  when the reading is over a minute old, so the value the user is looking at is current; wake, display
+  wake, a returning user session, a returning network and a power-state change are recovery checks bounded
+  by five minutes (a failed attempt always retries); the backstop timer runs at the user's interval on the
+  power adapter and at least an hour on battery or in Low Power Mode. The timer is a one-shot wall-clock
+  dispatch timer with a tolerance of at least 10% of the interval, so macOS can coalesce the wake-up. The
+  stale window is now twice the effective interval instead of a fixed hour, an install's jitter offset is
+  drawn once and persisted instead of re-randomised per poll, and the default refresh interval is 30
+  minutes (still 5–240). A clock change re-derives the age and deadline without a fetch. Rationale and
+  evidence: `docs/PLAN.md` Step 6.7.
+
 - The menu bar always shows the account balance. The menu-bar metric picker is gone, along with the
   today-spend and cache-hit modes; a low balance replaces the balance with a warning glyph as before.
 - Settings are now refresh interval, low-balance threshold, notifications on/off, notification cooldown and

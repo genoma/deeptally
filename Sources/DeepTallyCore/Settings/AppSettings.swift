@@ -13,7 +13,7 @@ public struct AppSettings: Codable, Sendable, Equatable {
   public var notificationCooldownMinutes: Int
 
   public init(
-    refreshIntervalMinutes: Int = 20,
+    refreshIntervalMinutes: Int = 30,
     lowBalanceThreshold: Decimal = 2,
     notificationsEnabled: Bool = true,
     notificationCooldownMinutes: Int = 720
