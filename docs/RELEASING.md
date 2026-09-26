@@ -1,15 +1,21 @@
 # Releasing
 
-The release policy lives in [`PLAN.md`](PLAN.md) §8; the machinery is built in Step 6 and first used in
-Step 7 (v0.1.0). Commands marked **planned** do not exist in the repository yet — they are frozen together
-with the step named next to them.
+The release policy lives in [`PLAN.md`](PLAN.md) §8. Two pieces do the work: `make release-check
+VERSION=X.Y.Z` builds and verifies every published file locally, and the Release workflow
+([`../.github/workflows/release.yml`](../.github/workflows/release.yml)) publishes them when a `vX.Y.Z` tag is
+pushed. **Immutable Releases are enabled on the repository**, so a published release and its tag can never be
+edited or deleted: a bad release is fixed by tagging the next patch version, never by re-uploading assets
+onto the old tag.
 
 ## Preconditions
 
-- `develop` is green: `make verify`.
-- Every checkbox of the current plan step is flipped, and that step's gate passed.
-- `gh` is authenticated (`gh auth status`) and the version number is decided per SemVer — `0.y.z` until
-  the first stable release; a breaking change bumps MINOR while pre-1.0.
+- `develop` is green: `make verify` — the gate CI runs on every push to `develop` and `main` and on every
+  pull request ([`../.github/workflows/ci.yml`](../.github/workflows/ci.yml)).
+- The version number is decided per SemVer — `0.y.z` until the first stable release; a breaking change bumps
+  MINOR while pre-1.0.
+- [`../CHANGELOG.md`](../CHANGELOG.md) will carry a `## [X.Y.Z]` heading for the tag: the release workflow
+  refuses to publish a version that has none.
+- `gh` is authenticated (`gh auth status`) for the tap step.
 - Signing is unchanged and deliberate: **ad-hoc, not notarized** ([`PLAN.md`](PLAN.md) §1).
 
 ## 1. Cut the release branch
@@ -21,35 +27,33 @@ git switch -c release/X.Y.Z develop
 ## 2. Freeze the CHANGELOG
 
 Move the `[Unreleased]` entries in [`../CHANGELOG.md`](../CHANGELOG.md) under a new `[X.Y.Z] - YYYY-MM-DD`
-heading, keeping the Keep a Changelog grouping (Added / Changed / Fixed / …). Then commit:
+heading, keeping the Keep a Changelog grouping (Added / Changed / Fixed / …). The heading must read exactly
+`## [X.Y.Z]` — the release workflow greps for it when the tag is pushed. Then commit:
 
 ```sh
 git commit -m "chore(release): freeze CHANGELOG for X.Y.Z"
 ```
 
-## 3. Run the gate
+## 3. Run the release check
 
 ```sh
-make verify
+make release-check VERSION=X.Y.Z
 ```
 
-Planned (Step 6): `make release-check` adds the release-specific checks (DMG, checksums, bundle contents).
+This is the release gate. It runs `make verify` (build, test, lint, bundle, signature check) and then
+`Scripts/release-assets.sh`, which builds the five published files under `dist/` and verifies `SHA256SUMS`
+against them:
 
-## 4. Build the DMG
+- `DeepTally-X.Y.Z.dmg` — the app, via `Scripts/bundle.sh` and `Scripts/dmg.sh`;
+- `deeptally-X.Y.Z-arm64.tar.gz` — the CLI binary plus `DeepTally_DeepTallyCore.bundle` at the archive root;
+- `install.sh` — a copy of `Scripts/install.sh`;
+- `deeptally.rb` — the Homebrew formula, rendered for this version with the CLI tarball URL and its SHA-256;
+- `SHA256SUMS` — one `shasum -a 256` line for each file above.
 
-Planned (Step 6): `make dmg` → `dist/DeepTally-X.Y.Z.dmg`, via `Scripts/dmg.sh` and `hdiutil`
-([`../AGENTS.md`](../AGENTS.md) §4 documents the target; `Scripts/dmg.sh` is the Step 6 deliverable).
+The build refuses to finish if `SHA256SUMS` does not verify its own artifacts, so a green run means this
+`dist/` is publishable.
 
-## 5. Generate checksums
-
-Every release publishes `SHA256SUMS` beside the DMG ([`PLAN.md`](PLAN.md) §8). Planned (Step 6): the release
-workflow generates it. The local equivalent is:
-
-```sh
-shasum -a 256 dist/DeepTally-X.Y.Z.dmg > SHA256SUMS
-```
-
-## 6. Merge to main
+## 4. Merge to main
 
 ```sh
 git switch main
@@ -59,7 +63,7 @@ git merge --no-ff release/X.Y.Z
 Merge the release branch back into `develop` as well if it carries commits `develop` does not have yet
 (the CHANGELOG freeze is one).
 
-## 7. Tag
+## 5. Tag
 
 ```sh
 git tag -a vX.Y.Z -m "DeepTally vX.Y.Z"
@@ -67,32 +71,41 @@ git tag -a vX.Y.Z -m "DeepTally vX.Y.Z"
 
 Tags live on `main`. Push the branch and the tag.
 
-## 8. Publish
+## 6. Publish
 
-Planned (Step 6): `.github/workflows/release.yml` — tag → DMG + `SHA256SUMS` + GitHub Release. The manual
-equivalent, with release notes taken from the frozen CHANGELOG entry:
+Pushing the tag is the publish step: `.github/workflows/release.yml` refuses to touch a tag that already has
+a release, requires the matching `## [X.Y.Z]` CHANGELOG heading, runs `make release-check` on the tagged
+commit, takes the release notes from that CHANGELOG section, and uploads the DMG, the CLI tarball,
+`SHA256SUMS`, `install.sh` and `deeptally.rb`. There is no manual `gh release create` in the happy path.
 
-```sh
-gh release create vX.Y.Z dist/DeepTally-X.Y.Z.dmg SHA256SUMS
-```
+For a version that has no tag yet, run the workflow manually (`workflow_dispatch`): it does the same
+validation and build for the version you type and stops before publishing. That is the dry run.
 
-Then enable **Immutable Releases** on the repository ([`PLAN.md`](PLAN.md) §8) so a published tag and its
-artifacts cannot be replaced. TODO (Step 6): record the exact repository setting and confirm it in the
-release checklist.
+**Never re-upload to an existing tag.** Immutable Releases are enabled on the repository: a published release
+cannot be edited or deleted, so a bad release gets the next patch version.
 
-## 9. Update the tap formula
+## 7. Update the tap formula
 
-The CLI ships as a Homebrew **formula** (`deeptally`) in the personal tap — never a cask, because casks now
-require Gatekeeper-passing apps ([`PLAN.md`](PLAN.md) §9, [`../AGENTS.md`](../AGENTS.md) §1). Bump the
-formula's version and SHA-256 to the new tag. TODO (Step 6): tap location and formula name.
+The CLI ships as a Homebrew **formula** (`deeptally`) in the personal tap at **`genoma/homebrew-tap`** —
+never a cask, because casks now require Gatekeeper-passing apps ([`PLAN.md`](PLAN.md) §9,
+[`../AGENTS.md`](../AGENTS.md) §1).
 
-## 10. Smoke-test on a clean machine
+`dist/deeptally.rb` is generated by `Scripts/release-assets.sh` for the version being released: it points at
+that release's CLI tarball URL and pins its SHA-256. The release workflow runs the same build, so the
+`deeptally.rb` asset on the release is the file to use. Copy it into the tap as `deeptally.rb` and commit it
+there. **The tap repository is created with the first release** — a formula that points at a tag before the
+release exists would 404, so there is nothing to put in the tap before then.
 
-Step 7's gate: install on a fresh macOS 15+, 26 or 27 machine using only the published instructions in
-[`INSTALL.md`](INSTALL.md), then confirm the app launches, the status item appears, and the CLI runs. Also
-verify `SHA256SUMS` as described in [`UNSIGNED.md`](UNSIGNED.md).
+## 8. Smoke-test on a clean machine
+
+The release is not done until a fresh macOS 15, 26 or 27 machine installs it using only the published
+instructions in [`INSTALL.md`](INSTALL.md), the app launches, the status item appears and the CLI runs.
+Verify `SHA256SUMS` as described in [`UNSIGNED.md`](UNSIGNED.md), including the DMG-only form. The three
+Gatekeeper dialog screenshots in `INSTALL.md` are still placeholders and need a human to click through a
+quarantined first launch.
 
 ## Hotfixes
 
 `hotfix/*` branches from `main`, gets the smallest possible fix, and is merged `--no-ff` into both `main`
-and `develop`. Tag a patch version and republish the DMG; never re-upload artifacts for an existing tag.
+and `develop`. Tag the next patch version to publish it; with Immutable Releases on, re-uploading assets for
+an existing tag is not possible.

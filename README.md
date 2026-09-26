@@ -1,5 +1,7 @@
 # DeepTally
 
+[![CI](https://github.com/genoma/deeptally/actions/workflows/ci.yml/badge.svg?branch=develop)](https://github.com/genoma/deeptally/actions/workflows/ci.yml)
+
 **DeepSeek usage meter for the macOS menu bar.** Balance, spend, tokens and cache-hit rate — at a glance, locally.
 
 > **Status: pre-alpha.** Step 4 is done — the menu bar shows the live balance plus two ledger-backed metrics
@@ -38,8 +40,27 @@ How to connect your API key, what each popover section shows and every setting a
 
 ## Install
 
-Not released yet. Planned: a DMG on GitHub Releases (ad-hoc signed, not notarized), plus a hash-pinned
-install script that avoids the Gatekeeper dialog entirely. See [`docs/PLAN.md`](docs/PLAN.md).
+Ad-hoc signed, not notarized — [`docs/UNSIGNED.md`](docs/UNSIGNED.md) explains what macOS is warning about.
+No release is published yet: these commands start resolving with the first one (v0.1.0).
+
+**Install script** (recommended; verifies the DMG's SHA-256 and never triggers the Gatekeeper dialog):
+
+```sh
+curl -fsSL https://github.com/genoma/deeptally/releases/latest/download/install.sh | bash -s -- --user
+```
+
+**DMG** — download `DeepTally-<version>.dmg` from the
+[releases page](https://github.com/genoma/deeptally/releases), drag `DeepTally.app` into `/Applications`,
+then follow the first-launch steps in [`docs/INSTALL.md`](docs/INSTALL.md).
+
+**CLI only** — download `deeptally-X.Y.Z-arm64.tar.gz` from the releases page and keep the `deeptally`
+binary and `DeepTally_DeepTallyCore.bundle` from the archive together in a directory on your `PATH`.
+[`docs/INSTALL.md`](docs/INSTALL.md) has the commands.
+
+**Uninstall** — the popover's **Uninstall DeepTally…** button offers **Export CSV First…**, then removes the
+login item, the Keychain item, the ledger, preferences, caches and saved state, and moves the app to the
+Trash. [`docs/INSTALL.md`](docs/INSTALL.md#uninstalling) describes each step and the `Scripts/uninstall.sh`
+route for source builds.
 
 ## CLI
 
