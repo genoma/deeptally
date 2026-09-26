@@ -9,8 +9,7 @@ maintainer can see.
 Please do not open a public issue for a vulnerability. There is no security email address.
 
 Include: affected version, macOS version, what you observed, and a minimal reproduction. If the report
-involves the API key or the opencode database, **do not attach the key, the database, or any real prompt or
-completion text**.
+involves the API key, **do not attach the key or any real prompt or completion text**.
 
 ## Supported versions
 
@@ -23,7 +22,7 @@ once v0.1.0 is published.
 What is worth protecting:
 
 - your DeepSeek API key (a single Keychain item);
-- your usage ledger — token counters, timestamps, model names and estimated costs, with no prompt or
+- your account balance and settings — amounts, timestamps, a low-balance threshold, with no prompt or
   completion content ([`docs/PRIVACY.md`](docs/PRIVACY.md));
 - the integrity of the file you download and install.
 
@@ -41,22 +40,18 @@ What the design assumes:
   permissive for your session — it reads back silently across rebuilds and does **not** prompt once per app
   update. That is a deliberate trade-off: no prompt friction, in exchange for the same exposure as a key
   exported in a shell rc file. Malware running as you is outside what DeepTally can defend against.
-- **Network attacker.** All requests are HTTPS to the two hosts listed in [`docs/PRIVACY.md`](docs/PRIVACY.md).
-  DeepTally does not pin certificates and does not install a custom CA.
+- **Network attacker.** All requests are HTTPS, and only the hosts listed in [`docs/PRIVACY.md`](docs/PRIVACY.md)
+  are ever contacted. DeepTally does not pin certificates and does not install a custom CA.
 - **MDM-managed Macs.** Management policy may refuse unsigned apps entirely. That is a deployment policy,
   not a vulnerability in DeepTally.
-- **opencode database.** The import is read-only, unions the two live schema generations
-  (`message` and `session_message`, which hold largely disjoint rows), and never reads
-  `credential`/`cred_*`/`account`/`auth` — a SQLite authorizer denies those reads outright.
 
-Out of scope: vulnerabilities in macOS itself, in the DeepSeek API, in opencode, or in third-party tools you
-point at the loopback proxy (v1.1).
+Out of scope: vulnerabilities in macOS itself or in the DeepSeek API.
 
 ## What this project will never do
 
-- Store or transmit prompt or completion content — counters, timestamps, model names and status codes only.
+- Store or transmit prompt or completion content — the app makes no completion calls, and it persists only
+  the balance, the settings and alert timestamps.
 - Upload telemetry or crash reports. There are no analytics or crash-reporting SDKs, and no third-party
   runtime dependencies at all ([`AGENTS.md`](AGENTS.md) §1).
 - Call DeepSeek's private dashboard endpoints, or contact any host beyond the two documented.
-- Read the opencode credential tables.
 - Print, log or export the API key; diagnostics mask it as `sk-…1234`.

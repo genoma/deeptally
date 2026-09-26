@@ -7,9 +7,11 @@ All machine facts below were **verified on the development machine on 2026-09-24
 
 ## 0. What this project is
 
-**DeepTally** — a native, ARM-only macOS menu bar app (plus a small CLI) showing DeepSeek API balance,
-token usage, spend and cache-hit rate. GPL-3.0-or-later. Distributed as an **ad-hoc signed** DMG from
-GitHub Releases (no Apple Developer Program, no notarization, no Homebrew cask).
+**DeepTally** — a native, ARM-only macOS menu bar app (plus a small CLI) showing the DeepSeek account
+balance and the peak/off-peak rate in force. **API-only by owner decision (2026-09-26):** DeepSeek exposes
+no usage or spend endpoint, so usage history is not a feature of this product. GPL-3.0-or-later. Distributed
+as an **ad-hoc signed** DMG from GitHub Releases (no Apple Developer Program, no notarization, no Homebrew
+cask).
 
 - App name: `DeepTally` · Bundle ID: `io.github.genoma.deeptally` · CLI: `deeptally` · Repo: `deeptally`
 - **The plan of record is [`docs/PLAN.md`](docs/PLAN.md).** Work proceeds step by step; flip the
@@ -19,16 +21,15 @@ GitHub Releases (no Apple Developer Program, no notarization, no Homebrew cask).
 
 - **macOS 15.0 minimum** deployment target. **arm64 only.** No Intel, no universal binaries, no Rosetta.
 - **Zero third-party runtime dependencies.** No SwiftData, no Sparkle, no analytics SDKs, no SPM packages
-  without explicit approval. System frameworks + `libsqlite3` only.
+  without explicit approval. System frameworks only.
 - **Network access to exactly two hosts:** `api.deepseek.com` and (update check only) `api.github.com`.
-  An opt-in loopback proxy binds `127.0.0.1` only.
+  No loopback listener, no proxy, no local capture.
 - **No App Sandbox, no App Store, no Homebrew cask.** (Casks now require Gatekeeper-passing apps and
   `--no-quarantine` no longer exists — this is why there is no cask.)
-- **No telemetry, no crash reporting.** Never persist or log prompt/completion *content* — counters,
-  timestamps, model names and status codes only.
+- **No telemetry, no crash reporting.** The app never sees prompt or completion *content* — it makes no
+  completion calls, and it persists only the balance, the settings and alert timestamps.
 - **Xcode is NOT installed.** Never invoke `xcodebuild` or `actool`. Build with SwiftPM via the `Makefile`.
-- **Never touch opencode credential tables** (see §6). The API key never enters the repo, a log, a
-  crash report, a CSV export, or `UserDefaults`.
+- The API key never enters the repo, a log, a crash report, a preference, or an export of any kind.
 - No `try!`, no force-unwraps in `Sources/`, no `fatalError()` in shipped code paths.
 
 ## 2. Toolchain on the development machine (verified)
@@ -42,7 +43,6 @@ GitHub Releases (no Apple Developer Program, no notarization, no Homebrew cask).
 | `iconutil`, `sips` | `/usr/bin/iconutil`, `/usr/bin/sips` — present, this is the `.icns` path |
 | `notarytool`, `stapler` | present under CLT (unused: we do not notarize) |
 | Signing identities | **none** (0 Developer ID, 0 Apple Development) → signing is always `--sign -` (ad-hoc) |
-| SQLite | `SQLite3.modulemap` + `libsqlite3.tbd` ship in the CLT SDK → `import SQLite3`, no dependency |
 | Formatter | `swift format` (bundled). `swiftlint` / `swiftformat` / `xcodebuild` are NOT installed |
 | Homebrew | 7.0.6, prefix `/opt/homebrew` |
 | GitHub CLI | `gh` 2.101.0, authenticated as `genoma` with `repo` + `workflow` scopes |
@@ -98,7 +98,8 @@ make verify       # build + test + lint + codesign --verify + bundle launch smok
 make clean
 ```
 
-Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uninstall`, `release-check`.
+The release targets `install`, `uninstall`, `release-assets` and `release-check` exist; their policy is in
+`docs/PLAN.md` §8 and `docs/RELEASING.md`.
 
 ## 5. Secrets policy
 
@@ -113,10 +114,14 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 | Source | Path / endpoint | Rules |
 |---|---|---|
 | DeepSeek balance | `GET https://api.deepseek.com/user/balance` (Bearer) | string amounts, `balance_infos[]`, no timestamp — display "as of" |
-| DeepSeek models | `GET https://api.deepseek.com/models` | `deepseek-flash`, `deepseek-v4-pro` |
-| DeepSeek usage | `usage.prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` per response | streamed usage rides the **last content chunk** |
-| opencode DB | `~/.local/share/opencode/opencode.db` | **read-only**, `message` table only, never `credential`/`cred_*` tables (they contain plaintext keys) |
-| Prices | `Resources/PriceTable.json` | versioned data, not code; user-overridable |
+| DeepSeek models | `GET https://api.deepseek.com/models` | `deepseek-flash`, `deepseek-v4-pro`; the client implements it, nothing calls it on its own |
+| Prices | `Sources/DeepTallyCore/Resources/PriceTable.json` | versioned data, not code; user-overridable via `~/.config/deeptally/PriceTable.json` |
+| Holidays | `Sources/DeepTallyCore/Resources/ChinaHolidays.json` | official 2026 Chinese State Council dates; data, not code |
+| API key | Keychain, service `io.github.genoma.deeptally`, account `api-key`; `DEEPSEEK_API_KEY` as fallback | never written anywhere else |
+| Preferences | `~/Library/Preferences/io.github.genoma.deeptally.plist` | settings, last balance reading, last alert time; the app writes no usage data |
+
+An older version kept a usage ledger at `~/Library/Application Support/DeepTally/ledger.sqlite`. The current
+app never reads or writes that directory; the uninstaller removes it whole (see `docs/PRIVACY.md`).
 
 ## 7. Git flow and versioning
 
@@ -133,9 +138,10 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 - Swift 6 language mode, strict concurrency. UI on `@MainActor`; I/O in actors.
 - `NSStatusItem` + `NSPopover` hosting SwiftUI — **not** `MenuBarExtra`-only (macOS 26 bug: the process
   exits silently when the user disables the item in Control Center → Menu Bar).
-- SQLite: WAL, `synchronous=NORMAL`, one connection, prepared statements, `raw_hash` unique for dedupe.
+- Money is `Decimal` and comes from data: prices load from `Resources/PriceTable.json`, never from Swift.
 - Errors: typed `enum` errors, user-facing strings separate from diagnostics.
-- Tests never touch the network and never open the real opencode DB — inject clients / use fixture DBs.
+- Tests never touch the network and never read the real Keychain from a state they cannot restore — inject
+  clients and document the seams they use.
 
 ## 9. Known gotchas
 
@@ -149,44 +155,29 @@ Planned targets (documented in `docs/PLAN.md`, added in Step 6): `install`, `uni
 5. Quarantine is the Gatekeeper gate: browser downloads are blocked, `curl` downloads are not.
 6. App Translocation: launching a quarantined app from outside `/Applications` runs it from a random
    read-only path and breaks login items/Keychain. Always move it first; detect and warn in-app.
-7. opencode has **two live schema generations** (`message` and `session_message`) holding largely *disjoint* usage rows
-   (verified on a real DB: 2590 rows only in `message`, 1062 only in `session_message`, 1638 in both). The importer must
-   **union both**, dedupe on `rawHash = (source, id, session_id)`, and let `message` win overlaps — 0 divergent counters
-   across the 1638 overlapping token-bearing rows, with a `time_updated` tie-break if that ever changes.
-   Token mapping: prompt = input + cache.read + cache.write · cacheHit = cache.read · cacheMiss = input + cache.write ·
-   completion = output + reasoning (opencode keeps reasoning *outside* output, and DeepSeek bills reasoning as output —
-   never add reasoning again downstream or output is double-counted).
-   The importer also installs a SQLite authorizer that DENYs reads on `credential*`/`cred_*`/`account*`/`auth*`.
-8. macOS 27 hides menu-item symbol images by default in `NSMenu`; use `labelStyle(.titleOnly)` / set
+7. macOS 27 hides menu-item symbol images by default in `NSMenu`; use `labelStyle(.titleOnly)` / set
    `preferredImageVisibility` explicitly.
-9. Peak/off-peak *classification* is computed in UTC against `Resources/ChinaHolidays.json`, but always
+8. Peak/off-peak *classification* is computed in UTC against `Resources/ChinaHolidays.json`, but always
    *displayed* in the user's local timezone, with the next transition and a countdown. Never show a
    window label that was derived from local-time arithmetic.
-10. **SwiftPM target names must differ by more than letter case, and so must their directories** —
-    APFS is case-insensitive, so `DeepTally` and `deeptally` map to the same `.build` products *and* the
-    same `Sources/` directory (the second target's files silently overwrite the first's). Hence:
-    app target/dir `DeepTallyApp`, CLI target `deeptally` with explicit `path: Sources/DeepTallyCLI`,
-    and the shipped bundle is still `DeepTally.app`.
-11. DeepSeek pricing is volatile (model retirements and renames happened three times in 2026) — never
+9. **SwiftPM target names must differ by more than letter case, and so must their directories** —
+   APFS is case-insensitive, so `DeepTally` and `deeptally` map to the same `.build` products *and* the
+   same `Sources/` directory (the second target's files silently overwrite the first's). Hence:
+   app target/dir `DeepTallyApp`, CLI target `deeptally` with explicit `path: Sources/DeepTallyCLI`,
+   and the shipped bundle is still `DeepTally.app`.
+10. DeepSeek pricing is volatile (model retirements and renames happened three times in 2026) — never
     hardcode model IDs or prices in Swift; load them from the versioned table.
-12. `UserDefaults(suiteName:)` leaves a 42-byte empty plist in `~/Library/Preferences` for every domain a
+11. `UserDefaults(suiteName:)` leaves a 42-byte empty plist in `~/Library/Preferences` for every domain a
     process has seen, and deleting the file does not help — `cfprefsd` writes it back. Test suites must use
     **one stable domain** (see `Tests/DeepTallyCoreTests/SettingsTests.swift`) rather than a UUID per test,
     or a run leaves residue that accumulates forever. That suite is marked `.serialized` so a single shared
     domain is safe.
-13. **Never write `#Preview` in this repo.** It expands via the `PreviewsMacros` plugin, which ships with
+12. **Never write `#Preview` in this repo.** It expands via the `PreviewsMacros` plugin, which ships with
     Xcode; Command Line Tools has no copy of it, so `swift build` fails with "external macro implementation
     type 'PreviewsMacros.SwiftUIView' could not be found". Use `PreviewProvider` structs instead — they still
     render in Xcode's canvas. Do not "fix" this with `#if canImport(PreviewsMacros)`: `canImport` resolves
     importable modules, not macro plugin dylibs, so that condition is false on every toolchain and would just
     hide dead code.
-14. **Adding a case to a public error enum breaks every target that switches over it exhaustively.** The
-    compiler catches this, but only per-target, so a core-only lane sees a green build while the app and CLI
-    targets are red. `PricingDataError` is described in three separate switches (the core diagnostic, the
-    CLI's `describe`, the app's `describe`), so one new case cost three file edits across two lanes' ownership
-    in Step 4. Before adding a case: `rg 'case \.' --glob '*.swift' Sources | grep -B2 <EnumName>` and fix
-    every match in the same commit. The durable fix (collapsing the three into one user-facing sentence on the
-    error type) is scheduled as a follow-up rather than done piecemeal.
 
 ## 10. Definition of done
 
