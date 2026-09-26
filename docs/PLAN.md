@@ -1,6 +1,6 @@
 # DeepTally — implementation plan
 
-**Status:** Step 6 complete · Step 6.5 in progress · **Last updated:** 2026-09-26 · **Owner:** @genoma
+**Status:** Step 6 complete · Step 6.5 complete · **Last updated:** 2026-09-26 · **Owner:** @genoma
 **Name:** DeepTally · **Repo:** `genoma/deeptally` · **Bundle:** `io.github.genoma.deeptally` · **CLI:** `deeptally`
 
 > **How we work:** one step at a time. A step is only done when its **gate** passes, its checkboxes are
@@ -341,20 +341,33 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 > plan's deferred proxy capture (decision 9) moves forward: any OpenAI-compatible client can be pointed at
 > a loopback proxy, and the ledger records the response's own numbers.
 
-- [ ] Core: `ProxyUsage` + `ProxyUsageReader` — reads usage out of a JSON body or an SSE stream, chunk-safe,
-      bounded memory, never retains content (lane X1)
-- [ ] App: opt-in `NWListener` on 127.0.0.1 (default port 8787), forwards to api.deepseek.com only, streams
+- [x] Core: `ProxyUsage` + `ProxyUsageReader` — reads usage out of a JSON body or an SSE stream, chunk-safe,
+      bounded memory, never retains content (lane X1: 11 tests, byte-by-byte chunk boundaries, both
+      token-split mutations verified to fail their pins)
+- [x] App: opt-in `NWListener` on 127.0.0.1 (default port 8787), forwards to api.deepseek.com only, streams
       the response through untouched, and records each completion's usage with `source: .proxy`, priced by
-      the same engine as every other row
-- [ ] Settings: a toggle (off by default) and the base URL to point clients at
-- [ ] Docs: `USAGE.md` (pi, opencode, curl examples), `PRIVACY.md` (what transits the proxy — the request
-      body and the Authorization header — and what is stored: counters only, never headers, keys or content),
-      `ARCHITECTURE.md`
-- [ ] Tests: parser units (including byte-by-byte chunk boundaries), forwarding/recording against a stubbed
-      upstream, and a real loopback smoke test
-  **Gate:** a real streaming and a real non-streaming completion through the proxy land one ledger row each
-  whose tokens equal the response's own numbers, and `deeptally usage` shows them; the client's response
-  bytes arrive unchanged.
+      the same engine as every other row (lane X2: 20 tests, one real URLSession-to-NWListener exchange;
+      one request per connection; `Accept-Encoding: identity` because URLSession decodes gzip itself)
+- [x] Settings: a toggle (off by default) and a port stepper (1024–65535), with the caption showing the
+      port actually bound
+- [x] Docs: `USAGE.md` (pi, opencode, curl setups, "use one path per client"), `PRIVACY.md` (what transits
+      in memory — the body and the `Authorization` header — and what is stored: counters only), `ARCHITECTURE.md`
+- [x] Tests: parser units, forwarding/recording against a stubbed upstream, a real loopback smoke test
+
+  **Gate evidence (2026-09-26, real completions with the Keychain key, scratch ledger):**
+  - One non-streaming and one streaming completion through the built app's proxy (`--spike proxy`) each
+    produced **one ledger row**: `proxy · deepseek · deepseek-flash · input 37 · output 0 · reasoning 4 ·
+    cache_read 0 · 8 µUSD`, matching the API's own response numbers exactly (the API's `completion_tokens`
+    includes reasoning; the ledger stores output 0 and reasoning 4, and bills 41 tokens).
+  - `deeptally usage --json` on that ledger: **spend 0.000016, requests 2, model deepseek-flash**. The human
+    table shows `$0.00` for 16 µUSD, which is the documented two-decimal floor, not a missing row.
+  - `lsof` on the running proxy: `TCP 127.0.0.1:PORT (LISTEN)` — loopback only.
+  - Harness: `/tmp/deeptally-proxy-gate.sh`.
+  - **Known limitation, documented in `USAGE.md`:** there is no cross-source dedupe. A client that is both
+    imported (opencode's database) and proxied lands **two rows** per call, so the rule is one path per
+    client: leave opencode on its direct connection, point unimportable clients (pi, scripts) at the proxy.
+  - **Not recoverable:** calls made before the proxy was enabled. There is no usage endpoint to backfill
+    from; the balance is the only signal for them.
 
 ### Step 7 — v0.1.0
 - [ ] `release/0.1.0` branch, CHANGELOG, tag `v0.1.0` on `main`, DMG + checksums published
@@ -464,3 +477,6 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 6 | **Release dry run, first end-to-end execution of the release workflow** (run 36227866864, 2m37s, throwaway branch since the CHANGELOG heading is required): version + CHANGELOG validation, `make release-check`, release-notes extraction, dry-run stop. Nothing was published; the branch was deleted. The publish step itself runs first at the v0.1.0 tag, which is Step 7's job. |
 | 2026-09-26 | 5 | **UI defect found by the user on real data, after Step 6:** the cache-hit trend drew every bar with `maxWidth: .infinity`, so the real two-day ledger rendered two 100% days as one panel-wide blue capsule that read as an unlabeled button that did nothing. Bars are now capped (10 pt, 2 pt floor, width shared across a full month) with the width arithmetic extracted to `TrendScale.barWidth` and tested; the same round exposed a swift-testing inference trap (a literal `(280 - 58) / 30` typed as integer division) now written explicitly. `bfdbd64`. The stale Sep-24 DMG that originally hid the fix was ejected and replaced, and the app in `/Applications` was reinstalled from the fresh build. |
 | 2026-09-26 | 6 | **Step 6 gate passed:** install into a throwaway prefix (hash verified, signature verified, wrong hash refused), print-only a no-op, uninstall with `--keep-keychain`/`--keep-login-item` leaving no residue and both bystanders intact, reinstall clean; the CLI tarball runs under `env -i`; the formula pins version, url and tarball hash. Independent read-only review found one P1 (the `--keep-data` help text promised to keep preferences and caches; it keeps only app data) and four P2s — `install.sh` deleting the working app before a possibly failing copy (now staged and swapped), the manual-removal text missing saved state, a stale `DEVELOPMENT.md` and the missing `make install|uninstall` targets, and an undocumented local `.sha256` source. All fixed, gate re-run green. **Still human:** the three Gatekeeper dialog screenshots and the DMG on a second macOS version. |
+| 2026-09-26 | 6.5 | **Course correction at the user's direction.** The popover showed `$0.00` today while the user was spending DeepSeek credits through pi, because the only local source was opencode's database (nothing since 2026-08-29). A pi-session importer was started and **stopped mid-build**: a per-harness importer binds the ledger to one client. A live API check (docs + probe + an open feature request) confirmed **DeepSeek has no usage or spend endpoint** — only `/user/balance` and the per-response `usage` field — so decision 9's proxy capture moved forward from v1.1: opt-in, binds 127.0.0.1 only, forwards to api.deepseek.com only, records counters and never keys or content. |
+| 2026-09-26 | 6.5 | Reader merged (`2994455`): `ProxyUsageReader` for JSON bodies and SSE streams, chunk-safe and bounded memory, 11 tests. A live capture proved the usage chunk arrives even without `stream_options.include_usage` (so the proxy never rewrites a request) and gave the exact token mapping: the API's `completion_tokens` **includes** reasoning, which the ledger stores separately and bills as output. |
+| 2026-09-26 | 6.5 | App server and docs merged (`f00ffe9`, `68df0ba`): NWListener with origin-form-only forwarding and explicit 400/501/502 refusals, settings toggle (off by default) plus port stepper, one ledger row per completion with `source: .proxy`, headless `--spike proxy`. 396 tests. **Live gate passed:** a streaming and a non-streaming completion with the real key landed two rows (`input 37 · output 0 · reasoning 4 · cache_read 0 · 8 µUSD` each, exactly the responses' own numbers), `deeptally usage --json` reported spend `0.000016` with 2 requests, and `lsof` showed `127.0.0.1` only. Docs lane flagged the gap the parent then documented: **no cross-source dedupe** — a client that is both imported and proxied double counts, so the rule is one path per client (opencode stays on its import; pi and scripts use the proxy). |

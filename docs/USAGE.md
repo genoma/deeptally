@@ -438,6 +438,12 @@ Add a provider block to `~/.config/opencode/opencode.jsonc`:
 Nothing else in opencode changes: its DeepSeek requests now go through the proxy, and the response usage
 lands in the ledger as it passes back.
 
+> **Use one path per client.** DeepTally imports opencode's database *and* can capture it through the
+> proxy, and it does not deduplicate across the two. If opencode is pointed at the proxy while the import
+> is still running, every new opencode call lands as **two rows** — one from each path. Leave opencode on
+> its direct connection (its database import already covers it) and use the proxy for clients DeepTally
+> cannot import, such as pi or a script. The same rule applies to any future importer.
+
 ### curl
 
 The same `Authorization` header you already use, pointed at the port — two lines:

@@ -118,13 +118,14 @@ If the app is running but its status item is hidden, `make kill` is the reliable
 
 ## Privacy
 
-DeepTally talks to exactly one host today: `api.deepseek.com`, for your account balance. Usage history is
-built locally from opencode's database (read-only) into a SQLite ledger at
-`~/Library/Application Support/DeepTally/ledger.sqlite`; a loopback-only proxy that forwards your own requests
-is planned for v1.1, opt-in. `api.github.com` is reserved for a future update check and is not contacted by
-any current build. No analytics. No crash reporting. No third-party servers. The API key lives in the macOS
-Keychain, never in a file or a preference; if the Keychain read fails, the app falls back to
-`DEEPSEEK_API_KEY` and says so in a banner. What the ledger stores, and how to delete it, is in
+DeepTally talks to exactly one host today: `api.deepseek.com`, for your account balance and, when the
+opt-in local proxy is on, for the requests you route through it. Usage history is built locally from
+opencode's database (read-only) and from the usage DeepSeek returns to the proxy, into a SQLite ledger at
+`~/Library/Application Support/DeepTally/ledger.sqlite`. `api.github.com` is reserved for a future update
+check and is not contacted by any current build. No analytics. No crash reporting. No third-party servers.
+The API key lives in the macOS Keychain, never in a file or a preference; if the Keychain read fails, the
+app falls back to `DEEPSEEK_API_KEY` and says so in a banner. What the ledger stores, and how to delete it,
+is in
 [`docs/PRIVACY.md`](docs/PRIVACY.md).
 
 ## License
