@@ -88,9 +88,9 @@ enum CLI {
       deeptally ledger export <path.csv>
                                    Write every raw ledger row as CSV
       deeptally ledger prune --days N
-                                   Delete raw rows older than N days. The daily rollups keep only
-                                   the pruned range's aggregate: it no longer appears in
-                                   `deeptally usage`, and a reprice can no longer revise it
+                                   Delete raw rows older than N days. `deeptally usage` still
+                                   reports those days, read from the daily rollups as whole UTC
+                                   days; a reprice can no longer revise pruned rows
       deeptally ledger reprice [--json]
                                    Re-price every stored row with the current price table
       deeptally key status         Show which store supplies the API key
@@ -442,9 +442,11 @@ enum CLI {
   /// `deeptally usage [--json] [--days N]`.
   ///
   /// Every window is a run of **local** days ending today, built here with `Calendar.current` and
-  /// asked of the ledger as a `ts` range — never read out of the UTC-keyed `daily` rollups, which
-  /// would be off by a day for every user not on UTC. Queries are read-only: an empty ledger answers
-  /// with zeros and a hint, not an error.
+  /// handed to ``LedgerStore/usageWindow(since:until:provider:)``, which answers a day from `request`
+  /// while its rows are there and from the UTC-keyed `daily` rollup once a prune has taken them — so a
+  /// pruned range stays visible. A day the window only partly covers and the rollup cannot slice is
+  /// reported as unavailable rather than folded in, and the report says so. Queries are read-only: an
+  /// empty ledger answers with zeros and a hint, not an error.
   ///
   /// The unpriced-model warning from the Step-1 stub survives the real windows: a row the price table
   /// cannot price is the one thing a summary must not hide behind a zero, so plain output still
@@ -500,16 +502,21 @@ enum CLI {
     }
   }
 
-  /// One window's totals, as the half-open `ts` range the ledger compares against.
+  /// One window's totals, as the half-open `ts` range the ledger compares against. The ledger answers
+  /// from `request` where a day's rows are still there and from `daily` where a prune took them, so the
+  /// window carries how many days came from the rollup and which days it could not answer for at all.
   private static func window(
     for window: UsageWindow, ledger: LedgerStore
   ) throws -> UsageReport.Window {
-    UsageReport.Window(
+    let usage = try ledger.usageWindow(since: window.start, until: window.end)
+    return UsageReport.Window(
       key: window.key,
       label: window.label,
       start: window.start,
       end: window.end,
-      summary: try ledger.summary(since: window.start, until: window.end))
+      summary: usage.summary,
+      rollupDays: usage.rollupDayCount,
+      unavailableDays: usage.unavailableDays)
   }
 
   /// The price table's currency: the unit the ledger's amounts were priced in. Best effort — a
@@ -672,12 +679,12 @@ enum CLI {
   }
 
   /// `deeptally ledger prune --days N`. Only raw rows go: the UTC `daily` rollups derived from them
-  /// are kept, so the pruned days' aggregates survive (`LedgerStore.pruneRawRequests`).
+  /// are kept, and ``LedgerStore/usageWindow(since:until:provider:)`` reads them, so `deeptally usage`
+  /// still reports the pruned days — as whole UTC days, which is the resolution a prune costs.
   ///
-  /// No command reads those rollups yet, so the report must not imply the pruned range is still
-  /// available: the range disappears from `deeptally usage`, the rollups hold only its aggregate,
-  /// and a reprice — which reads raw rows — can no longer revise it. ``pruneReport(removed:days:)``
-  /// is the wording, kept separate so a test can pin it without capturing stdout.
+  /// The report says exactly that, and one more thing: a reprice reads raw rows, so it can no longer
+  /// revise what was pruned. ``pruneReport(removed:days:)`` is the wording, kept separate so a test can
+  /// pin it without capturing stdout.
   private static func ledgerPrune(_ arguments: [String], ledgerURL: URL) throws {
     let options: PruneOptions
     do {
@@ -697,16 +704,17 @@ enum CLI {
     print(pruneReport(removed: removed, days: options.days))
   }
 
-  /// The honest prune report. "The rollups were kept" was true but misleading: nothing reads them,
-  /// so the totals are not shown anywhere, and the rows cannot come back — the import watermark
-  /// stops a re-import from restoring them.
+  /// The honest prune report. The rollups are kept **and read**: `deeptally usage` still reports the
+  /// pruned days, but only as whole UTC days — a window that covers part of such a day cannot use it and
+  /// says which dates it left out — and `ledger reprice` can no longer revise pruned rows, because it
+  /// reads raw rows.
   static func pruneReport(removed: Int, days: Int) -> String {
     guard removed > 0 else {
       return "Nothing older than \(days) days to prune; the daily rollups are unchanged."
     }
     return "Pruned \(rawRows(removed)) older than \(days) days.\n"
-      + "  The pruned range no longer appears in `deeptally usage`: only its aggregate survives in"
-      + " the daily rollups, and `ledger reprice` can no longer revise it."
+      + "  `deeptally usage` still reports those days' aggregate, read from the daily rollups as whole"
+      + " UTC days; `ledger reprice` can no longer revise pruned rows."
   }
 
   private static let ledgerExportUsage = "usage: deeptally ledger export <path.csv>"

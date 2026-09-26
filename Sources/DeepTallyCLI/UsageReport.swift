@@ -16,9 +16,10 @@ struct UsageWindow: Equatable {
 ///
 /// "Today" is a question about the user's clock, and the ledger's `daily` rollups are keyed by **UTC**
 /// date on purpose, so every window here is a run of consecutive *local* days that the caller turns
-/// into a `ts` range. Reading local totals out of the rollups would be off by a day for every user who
-/// is not on UTC. Days are added through the calendar, never as 86 400 seconds, so a DST day stays a
-/// whole local day.
+/// into a `ts` range. Building "today" out of the rollups would be off by a day for every user who is
+/// not on UTC; ``LedgerStore/usageWindow(since:until:provider:)`` reads them only for whole days whose
+/// raw rows are gone, and reports those days as the UTC days they are. Days are added through the
+/// calendar, never as 86 400 seconds, so a DST day stays a whole local day.
 enum UsageWindows {
   /// Today, the last 7 days and the last 30 days — each ending with today, so the three windows nest
   /// and the totals can only grow from left to right.
@@ -58,6 +59,13 @@ struct UsageReport {
     let start: Date
     let end: Date
     let summary: LedgerSummary
+    /// How many of these days the ledger answered from the `daily` rollup: their raw rows were pruned.
+    /// They are whole UTC days, which is what the footnote under the tables says.
+    let rollupDays: Int
+    /// UTC dates (`YYYY-MM-DD`) the window only partly covers and whose raw rows are gone. Their
+    /// partial totals are not included — a whole-day rollup cannot be sliced — so the report names
+    /// them instead of quietly reporting a smaller window.
+    let unavailableDays: [String]
 
     /// Prompt plus completion, where prompt already includes cache reads and completion already
     /// includes reasoning — the ledger's own definitions, added rather than re-derived.
@@ -131,6 +139,12 @@ struct UsageReport {
       lines.append("n/a: no prompt tokens in that range, so there is no cache-hit rate to report.")
     }
 
+    let notes = [rollupDaysNote, unavailableDaysNote].compactMap { $0 }
+    if !notes.isEmpty {
+      lines.append("")
+      lines += notes
+    }
+
     lines.append("")
     lines.append("ledger: \(ledgerPath) — \(CLI.grouped(ledgerRowCount)) raw rows")
     return lines.joined(separator: "\n")
@@ -140,6 +154,35 @@ struct UsageReport {
   private var hasUnknownCacheHit: Bool {
     if selected.summary.models.contains(where: { $0.cacheHitRatio == nil }) { return true }
     return (windows + [selected]).contains { $0.summary.cacheHitRatio == nil }
+  }
+
+  /// One calm line saying that some of the days above came from the `daily` rollup and that a rollup day
+  /// is a whole UTC day, or `nil` when every day was read from its raw rows.
+  ///
+  /// The count is the largest ``Window/rollupDays`` of the reported windows, not their sum: the windows
+  /// nest (today inside 7 days inside 30 days), so adding them would count one pruned day three times.
+  private var rollupDaysNote: String? {
+    let count = (windows + [selected]).map(\.rollupDays).max() ?? 0
+    guard count > 0 else { return nil }
+    let table = "the daily rollup table, which is keyed by whole UTC days."
+    return count == 1
+      ? "note: 1 day in these windows comes from \(table)"
+      : "note: \(count) days in these windows come from \(table)"
+  }
+
+  /// One sentence naming every UTC date a window could not answer for, or `nil` when every day the
+  /// windows touch is a whole day. The dates are deduplicated across the windows and named in order.
+  private var unavailableDaysNote: String? {
+    let days = Set((windows + [selected]).flatMap(\.unavailableDays)).sorted()
+    guard !days.isEmpty else { return nil }
+    let named =
+      days.count == 1
+      ? days[0] : days.dropLast().joined(separator: ", ") + " and " + days[days.count - 1]
+    guard days.count > 1 else {
+      return "\(named) is only partly inside these windows, so its partial totals are not included."
+    }
+    return
+      "\(named) are only partly inside these windows, so their partial totals are not included."
   }
 
   /// One right-aligned column per number, two spaces between columns, no trailing blank cells.
@@ -238,29 +281,39 @@ private struct WindowDocument: Encodable {
   /// reads as the local midnight it is.
   let from: String
   let until: String
+  /// How many of the window's days came from the `daily` rollup because their raw rows were pruned.
+  let rollupDays: Int
+  /// The `YYYY-MM-DD` UTC dates the window only partly covers and cannot answer for.
+  let unavailableDays: [String]
   let numbers: Numbers
 
   enum CodingKeys: String, CodingKey {
     case key
     case from
     case until
+    case rollupDays
+    case unavailableDays
   }
 
   init(window: UsageReport.Window, timeZone: TimeZone) {
     key = window.key
     from = Timestamps.local(window.start, in: timeZone)
     until = Timestamps.local(window.end, in: timeZone)
+    rollupDays = window.rollupDays
+    unavailableDays = window.unavailableDays
     numbers = Numbers(summary: window.summary)
   }
 
   /// The numbers are merged into this object rather than nested under a `totals` key: a script should
   /// read `.windows[0].spend`. The key sets cannot collide — this type's own keys are exactly `key`,
-  /// `from` and `until`.
+  /// `from`, `until`, `rollupDays` and `unavailableDays`.
   func encode(to encoder: any Encoder) throws {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(key, forKey: .key)
     try container.encode(from, forKey: .from)
     try container.encode(until, forKey: .until)
+    try container.encode(rollupDays, forKey: .rollupDays)
+    try container.encode(unavailableDays, forKey: .unavailableDays)
     try numbers.encode(to: encoder)
   }
 }
