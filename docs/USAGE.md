@@ -298,6 +298,13 @@ horizon.
 
 `reprice` is the repair path for stored costs; see the next section.
 
+**Both commands write to the ledger, so try them on a copy first.** Point the CLI at another file with
+`DEEPTALLY_LEDGER=/tmp/ledger-copy.sqlite` instead of the standard one; it applies to every command. `HOME`
+does **not** redirect the ledger — macOS resolves the application-support directory from the real home — so
+this variable is the way to prune or reprice experimentally without touching the app's ledger. Restoring the
+real one after an accidental prune is `deeptally import --full`, which re-reads opencode and re-inserts the
+rows `raw_hash` no longer has.
+
 ### Unpriced models: what the warning means, and the repair
 
 Model ids are resolved through the price table, **including its `aliases` list**: an id DeepSeek renamed keeps

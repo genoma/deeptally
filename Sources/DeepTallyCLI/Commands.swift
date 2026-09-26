@@ -109,6 +109,8 @@ enum CLI {
     LEDGER:
       ~/Library/Application Support/DeepTally/ledger.sqlite, shared with the app. Days are local
       days on your clock; every row keeps the peak/off-peak price in force at its own instant.
+      Set DEEPTALLY_LEDGER=<path> to use another file, the safe way to try `ledger prune` or
+      `ledger reprice` without touching the real ledger.
 
     KEY:
       Read from the Keychain first, then from DEEPSEEK_API_KEY. Import it once with:
@@ -119,6 +121,21 @@ enum CLI {
       2 no usable key: neither store has one, or the service rejected the stored one
       1 a usage error or any other failure (a network outage, a rate limit, a server error)
     """
+
+  /// The ledger this process should use: `DEEPTALLY_LEDGER` when it names a path, the standard
+  /// `~/Library/Application Support/DeepTally/ledger.sqlite` otherwise.
+  ///
+  /// An environment variable rather than a flag because it applies to every command in one
+  /// invocation, and because pointing the CLI at a copy is how a prune or a reprice gets tried
+  /// safely. `HOME` cannot do it: `FileManager` resolves the application-support directory from the
+  /// real home, not the environment (learned the hard way, 2026-09-26).
+  static func resolvedLedgerURL(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    fallback: URL = LedgerStore.standardURL
+  ) -> URL {
+    guard let path = environment["DEEPTALLY_LEDGER"], !path.isEmpty else { return fallback }
+    return URL(fileURLWithPath: path)
+  }
 
   /// Runs one invocation and returns the process exit code. Failures go to stderr here, so exactly
   /// one place decides what an error looks like.
