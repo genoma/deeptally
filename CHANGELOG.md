@@ -5,46 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-09-26
+
+First public release. DeepTally is **API-only by design**: DeepSeek exposes no usage or spend endpoint to an
+API key, so the app shows the balance, the rate in force and the key handling — it does not show spend
+history, and it does not pretend to. The decision and its evidence are in `docs/COUNCIL-2026-09-26.md`.
 
 ### Added
 
-- Project foundation: GPL-3.0-or-later license, README, `AGENTS.md`, implementation plan in `docs/PLAN.md`.
-- Buildable skeleton: `DeepTallyCore` (types, errors, DeepSeek balance/models client), `DeepTallyApp` menu bar shell
-  (`NSStatusItem` + popover, `LSUIElement`), `deeptally` CLI (`balance`), hand-assembled ad-hoc-signed `.app` bundle.
-- Pricing: `PriceTableLoader` (bundled + user override), `HolidayCalendar`, `PeakOffPeakEngine` (UTC windows, Shanghai
-  holidays, exact next transition) and `CostEngine` (peak/off-peak pricing, effective rates).
-- Usage parsing: non-streaming and SSE accumulators, streaming model extraction, typed error envelopes for 401/402/429.
-- opencode importer: read-only SQLite, unions both schema generations, SHA-256 dedupe hashes, credential-table read denial.
-- Assets: deterministic icon generator (10 iconset sizes → `.icns`), menu bar template glyph, README hero.
-- Docs: `INSTALL`, `UNSIGNED`, `PRIVACY`, `ARCHITECTURE`, `DEVELOPMENT`, `RELEASING`, `SECURITY`, `CONTRIBUTING`.
-- 72 tests across 14 suites; `swift format` config pinned.
-
-### Changed
-
-- **The balance refresh policy is event-driven with a deferrable backstop.** Opening the popover fetches
-  when the reading is over a minute old, so the value the user is looking at is current; wake, display
-  wake, a returning user session, a returning network and a power-state change are recovery checks bounded
-  by five minutes (a failed attempt always retries); the backstop timer runs at the user's interval on the
-  power adapter and at least an hour on battery or in Low Power Mode. The timer is a one-shot wall-clock
-  dispatch timer with a tolerance of at least 10% of the interval, so macOS can coalesce the wake-up. The
-  stale window is now twice the effective interval instead of a fixed hour, an install's jitter offset is
-  drawn once and persisted instead of re-randomised per poll, and the default refresh interval is 30
-  minutes (still 5–240). A clock change re-derives the age and deadline without a fetch. Rationale and
-  evidence: `docs/PLAN.md` Step 6.7.
-
-- The menu bar always shows the account balance. The menu-bar metric picker is gone, along with the
-  today-spend and cache-hit modes; a low balance replaces the balance with a warning glyph as before.
-- Settings are now refresh interval, low-balance threshold, notifications on/off, notification cooldown and
-  the key import/forget row; `menuBarMetric`, `proxyEnabled`, `proxyPort` and `showSecondaryMetric` were
-  removed from the stored settings (an old blob keeps every remaining field and falls back to defaults for
-  the removed ones).
-
-### Removed
-
-- The local usage ledger (schema, rollups, migrations) and everything that filled it: the opencode importer,
-  the opt-in loopback proxy and its response reader, the analytics panel, CSV import/export, `ledger reprice`,
-  the unpriced-row machinery, the `usage` / `import` / `ledger` CLI commands and `DEEPTALLY_LEDGER`.
-  DeepSeek returns per-response usage only to the caller of that request and stores nothing queryable, so the
-  usage half of the product had no API-only source; the decision and its evidence are in
-  `docs/COUNCIL-2026-09-26.md`, and the plan steps are marked reverted in `docs/PLAN.md`.
+- A native macOS menu bar app (`NSStatusItem` + SwiftUI popover, `LSUIElement`) and a `deeptally` CLI sharing
+  one core library; macOS 15+, Apple silicon only.
+- The DeepSeek account balance in the menu bar: account currency shown as-is (no FX conversion), an honest
+  "as of" age, a low-balance warning glyph, and a configurable low-balance threshold ($2.00 by default).
+- Desktop notifications for a low balance, with the menu-bar warning glyph as the fallback when macOS will not
+  deliver, and a configurable cooldown.
+- Keychain-backed API key handling: import from the login shell, status and delete (`DEEPSEEK_API_KEY` as a
+  fallback); the key never enters preferences, logs or an export.
+- A rate-now panel: the peak/off-peak window in the user's local timezone, the countdown to the next
+  transition, and the effective USD/1M-token prices, from a versioned price table (bundled, user-overridable)
+  and the 2026 Chinese public-holiday calendar.
+- A refresh policy built for an API with no change signal: fetch when the popover opens, checks on wake,
+  display wake, session switch-in, network return and power-state change, and a deferrable backstop timer
+  (30 minutes by default, at least an hour on battery or in Low Power Mode).
+- Launch at login via `SMAppService`, a quarantine/translocation warning banner, and an in-app uninstaller
+  (also `DeepTally --uninstall`) that removes the login item, Keychain item, preferences, caches and the app.
+- Settings: refresh interval (5–240 minutes), low-balance threshold, notifications and cooldown.
+- `deeptally` CLI: `balance`, `rate`, `key import|status|delete`, `--version`.
+- Distribution: ad-hoc-signed (not notarized) DMG and CLI tarball with `SHA256SUMS`, an `install.sh` that
+  verifies the hash and signature, and a Homebrew formula for the CLI; Immutable Releases on GitHub.
+- Documentation: `INSTALL`, `UNSIGNED`, `PRIVACY`, `USAGE`, `ARCHITECTURE`, `DEVELOPMENT`, `RELEASING`,
+  `SECURITY` and `CONTRIBUTING`.
