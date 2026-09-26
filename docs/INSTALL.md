@@ -188,7 +188,8 @@ that cannot be recreated, so exporting it before the removal is one click. Then,
 
 Nothing outside that list is touched. If you built from source (Path 3), [`../Scripts/uninstall.sh`](../Scripts/uninstall.sh)
 drives the same code from a terminal: it finds the app in `/Applications` or `~/Applications` (`--app PATH`
-overrides that) and passes `--yes`, `--print-only`, `--keep-data`, `--keep-keychain` and `--trash-dir PATH`
+overrides that) and passes `--yes`, `--print-only`, `--keep-data`, `--keep-keychain`, `--keep-login-item`
+and `--trash-dir PATH`
 through to `DeepTally --uninstall`. With no bundle found it removes nothing and prints the manual commands
 from [`PRIVACY.md`](PRIVACY.md). The export and delete details are in the export/delete section of
 [`PRIVACY.md`](PRIVACY.md).

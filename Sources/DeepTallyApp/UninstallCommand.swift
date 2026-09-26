@@ -6,7 +6,7 @@ import Foundation
 /// *Uninstall DeepTally…* button runs.
 ///
 ///   DeepTally --uninstall [--yes] [--print-only] [--home PATH] [--keep-data] [--keep-keychain]
-///                        [--trash-dir PATH]
+///                        [--keep-login-item] [--trash-dir PATH]
 ///
 /// Exit codes, contractual for the script: `0` success (including `--print-only`, which changes
 /// nothing), `2` a usage error, `1` a refusal or a failure — a translocated bundle, a Keychain the

@@ -4,10 +4,11 @@
 
 **DeepSeek usage meter for the macOS menu bar.** Balance, spend, tokens and cache-hit rate — at a glance, locally.
 
-> **Status: pre-alpha.** Step 4 is done — the menu bar shows the live balance plus two ledger-backed metrics
+> **Status: pre-alpha.** Step 5 is done — the menu bar shows the live balance plus two ledger-backed metrics
 > (today's spend and the cache-hit rate), the app imports local opencode usage into its own SQLite ledger,
-> and the CLI can import, summarise, export, prune and reprice. The analytics popover and CSV import are
-> Step 5 in [`docs/PLAN.md`](docs/PLAN.md).
+> shows an analytics panel, and exports or imports it as CSV; the CLI can import, summarise, export, prune
+> and reprice, and reads pruned history out of its daily rollups. Step 6, the release machinery, is built and
+> waiting for the v0.1.0 tag in [`docs/PLAN.md`](docs/PLAN.md).
 
 ## What it does
 
