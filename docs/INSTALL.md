@@ -4,7 +4,7 @@ DeepTally is **ad-hoc signed and not notarized** — there is no Apple Developer
 deliberate, documented trade-off and it shapes every install path below. If a Gatekeeper dialog worries you,
 read [`UNSIGNED.md`](UNSIGNED.md) first: it explains exactly what macOS is warning about and what is harmless.
 
-**Status:** v0.1.0 is the first release; the download URLs below resolve to it.
+**Status:** released; the download URLs below resolve to the latest release.
 
 ## Requirements (all paths)
 
@@ -121,7 +121,7 @@ the `deeptally` binary and the `DeepTally_DeepTallyCore.bundle` directory it rea
 holiday calendar from; both sit at the archive root and have to stay side by side.
 
 ```sh
-VERSION=0.1.0
+VERSION=0.1.2   # replace with the latest release
 curl -fSL --retry 3 -o "deeptally-${VERSION}-arm64.tar.gz" \
   "https://github.com/genoma/deeptally/releases/download/v${VERSION}/deeptally-${VERSION}-arm64.tar.gz"
 mkdir -p ~/.local/bin
