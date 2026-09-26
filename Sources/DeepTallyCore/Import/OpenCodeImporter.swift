@@ -105,8 +105,8 @@ public struct OpenCodeImporter {
 
     try execute(database, sql: "PRAGMA busy_timeout = 2000")
 
-    // Only used to narrow the read; the authoritative cutoff is `reconsideredRawHashes(_:since:)`
-    // below.
+    // The time pre-filter only narrows the read; the authoritative admission test is
+    // `reconsideredRawHashes(_:since:)` below.
     let sinceMilliseconds = since.map { Int64(($0.timeIntervalSince1970 * 1_000).rounded(.down)) }
     let schema = try detectSchema(in: database)
     var candidates: [Candidate] = []
@@ -121,8 +121,6 @@ public struct OpenCodeImporter {
           database, generation: .sessionMessage, sinceMilliseconds: sinceMilliseconds))
     }
 
-    let merged = merge(candidates)
-
     // What the scan reports as "newest seen" decides the next watermark, so it has to cover every
     // instant this pass looked at - including opencode's own updates. Reporting only the record
     // instants left a touched row that is newer than the newest created time re-offered on every
@@ -133,10 +131,14 @@ public struct OpenCodeImporter {
     let covered: [Candidate]
     if let since {
       let reconsidered = Self.reconsideredRawHashes(candidates, since: since)
-      kept = merged.filter { reconsidered.contains($0.rawHash) }
-      covered = candidates.filter { reconsidered.contains($0.rawHash) }
+      // The time pre-filter drops a copy nothing has touched, and that copy can be the one a full
+      // scan would choose. Re-read the admitted groups with no time filter, so `merge` decides each
+      // of them from all of their copies (review finding N4).
+      covered = try readAdmittedGroupCopies(
+        database, schema: schema, candidates: candidates, admitted: reconsidered)
+      kept = merge(covered)
     } else {
-      kept = merged
+      kept = merge(candidates)
       covered = candidates
     }
     return (kept, Self.newestInstant(records: kept, candidates: covered))
@@ -176,15 +178,10 @@ public struct OpenCodeImporter {
   /// differs (``LedgerStore/upsert(_:)``).
   ///
   /// The answer is a set of `rawHash`es rather than a filtered candidate list, so the union's choice
-  /// between a row's generations does not depend on the watermark in the ordinary case.
-  ///
-  /// Known limitation (review finding N4): it still can, when one copy's `time_created` **and**
-  /// `time_updated` are both older than the watermark while another copy of the same row was touched.
-  /// The group then holds only the touched copy, so a full scan could have chosen a different one, and
-  /// the model a report shows can differ from the model a full scan would report. Nothing is written
-  /// differently today (equal counters count as unchanged), so this is a reporting inconsistency, not a
-  /// ledger one. The fix is to decide each group from all of its copies before the watermark filter;
-  /// it is tracked for Step 5 rather than half-done here.
+  /// between a row's generations does not depend on the watermark. The set is the admission test for
+  /// the incremental scan: the scan re-reads every copy of the groups it names, without the time
+  /// pre-filter, so the merge decides each group from all of its copies - including one nothing has
+  /// touched since the watermark, which may be the copy a full scan would choose (review finding N4).
   /// The cost is recomputed from whichever record the merge chose, at that record's own instant.
   private static func reconsideredRawHashes(
     _ candidates: [Candidate], since: Date
@@ -338,9 +335,24 @@ public struct OpenCodeImporter {
           + filter
       }
     }
+
+    /// The second read of the incremental path: the same columns restricted to the admitted ids, with
+    /// **no** time filter, so the copies the pre-filter dropped come back too.
+    func sql(idCount: Int) -> String {
+      let placeholders = (1...idCount).map { "?\($0)" }.joined(separator: ", ")
+      switch self {
+      case .message:
+        return "SELECT id, session_id, time_created, time_updated, data FROM message"
+          + " WHERE id IN (\(placeholders))"
+      case .sessionMessage:
+        return "SELECT id, session_id, time_created, time_updated, data, type FROM session_message"
+          + " WHERE id IN (\(placeholders))"
+      }
+    }
   }
 
   private struct Candidate {
+    let id: String
     let rawHash: String
     let record: UsageRecord
     let usage: TokenUsage
@@ -348,21 +360,96 @@ public struct OpenCodeImporter {
     let isMessageGeneration: Bool
   }
 
+  /// Re-reads every copy of the groups `admitted` names. The second query is restricted by `id`
+  /// alone: an id narrows the read, and the session part of the group key stays in memory, because a
+  /// row-value comparison in SQL would never match a NULL `session_id` (`NULL = NULL` is `NULL`).
+  private func readAdmittedGroupCopies(
+    _ database: OpaquePointer,
+    schema: Schema,
+    candidates: [Candidate],
+    admitted: Set<String>
+  ) throws -> [Candidate] {
+    let ids = Set(candidates.lazy.filter { admitted.contains($0.rawHash) }.map(\.id)).sorted()
+    guard !ids.isEmpty else { return [] }
+
+    var copies: [Candidate] = []
+    for chunk in Self.chunks(of: ids, size: Self.maximumBoundIDs) {
+      if schema.hasMessage {
+        copies.append(
+          contentsOf: try readCandidates(database, generation: .message, ids: chunk))
+      }
+      if schema.hasSessionMessage {
+        copies.append(
+          contentsOf: try readCandidates(database, generation: .sessionMessage, ids: chunk))
+      }
+    }
+    return copies.filter { admitted.contains($0.rawHash) }
+  }
+
+  /// SQLite bounds the number of parameters in one statement, so id reads are split into chunks this
+  /// size instead of relying on the platform's limit.
+  private static let maximumBoundIDs = 500
+
+  private static func chunks(of values: [String], size: Int) -> [[String]] {
+    stride(from: 0, to: values.count, by: size).map {
+      Array(values[$0..<min($0 + size, values.count)])
+    }
+  }
+
   private func readCandidates(
     _ database: OpaquePointer,
     generation: Generation,
     sinceMilliseconds: Int64?
   ) throws -> [Candidate] {
+    try readCandidates(
+      database,
+      generation: generation,
+      sql: generation.sql(sinceMilliseconds: sinceMilliseconds),
+      bind: { prepared in
+        if let sinceMilliseconds {
+          sqlite3_bind_int64(prepared, 1, sinceMilliseconds)
+        }
+      })
+  }
+
+  /// The id-restricted read of the incremental path; `ids` is chunked, never empty.
+  private func readCandidates(
+    _ database: OpaquePointer,
+    generation: Generation,
+    ids: [String]
+  ) throws -> [Candidate] {
+    var candidates: [Candidate] = []
+    for chunk in Self.chunks(of: ids, size: Self.maximumBoundIDs) {
+      candidates.append(
+        contentsOf: try readCandidates(
+          database,
+          generation: generation,
+          sql: generation.sql(idCount: chunk.count),
+          bind: { prepared in
+            for (offset, id) in chunk.enumerated() {
+              _ = sqlite3_bind_text(
+                prepared, Int32(offset + 1), id, -1,
+                unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            }
+          }))
+    }
+    return candidates
+  }
+
+  /// Prepares `sql`, binds it with `bind` and decodes every row it returns.
+  private func readCandidates(
+    _ database: OpaquePointer,
+    generation: Generation,
+    sql: String,
+    bind: (OpaquePointer) -> Void
+  ) throws -> [Candidate] {
     var statement: OpaquePointer?
-    let prepare = sqlite3_prepare_v2(
-      database, generation.sql(sinceMilliseconds: sinceMilliseconds), -1, &statement, nil)
+    let prepare = sqlite3_prepare_v2(database, sql, -1, &statement, nil)
     guard prepare == SQLITE_OK, let prepared = statement else {
       throw Self.sqliteError(prepare, message: Self.errorMessage(database), context: "prepare read")
     }
     defer { _ = sqlite3_finalize(prepared) }
-    if let sinceMilliseconds {
-      sqlite3_bind_int64(prepared, 1, sinceMilliseconds)
-    }
+    bind(prepared)
 
     var candidates: [Candidate] = []
     while true {
@@ -427,6 +514,7 @@ public struct OpenCodeImporter {
       sessionID: sessionID
     )
     return Candidate(
+      id: id,
       rawHash: Self.rawHash(id: id, sessionID: sessionID),
       record: record,
       usage: usage,
