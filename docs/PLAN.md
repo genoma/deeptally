@@ -129,7 +129,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
 - [x] GPL-3.0 `LICENSE`, `README.md`, `AGENTS.md`, `CHANGELOG.md`, `.gitignore`
 - [x] `docs/PLAN.md` (this file) with the step protocol
 - [x] Git flow branches (`main`, `develop`) + gitflow config prefixes
-- [x] Public GitHub repo `genoma/deeptally`, default branch `develop`
+- [x] Public GitHub repo `genoma/deeptally`; default branch `develop` until v0.1.0, `main` from the first release
   **Gate:** `git log` shows the foundation commit on both branches; repo reachable on GitHub.
 
 ### Step 1 — Buildable skeleton + first parallel lanes
@@ -150,7 +150,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   **Lanes:** ICON, PRICING, API, OPENCODE, DOCS (see §6) — parent owns Package.swift/Makefile/UI/scripts.
 
 ### Step 2 — M0 spikes (evidence, not features)
-- [ ] **S1** ad-hoc `.app` → DMG → real macOS 27 Gatekeeper flow  *👤 needs user screenshots*
+- [x] **S1** ad-hoc `.app` → DMG → real macOS 26/27 Gatekeeper flow — three dialog screenshots captured 2026-09-26 (`docs/assets/install-*.png`)
 - [ ] **S2** App Translocation: launch from DMG vs from `/Applications`
 - [ ] **S3** `SMAppService.mainApp.register()` under ad-hoc, in `/Applications` and `~/Applications`
 - [ ] **S4** `UNUserNotificationCenter` authorization under ad-hoc  *👤 needs an "Allow" click*
@@ -286,7 +286,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
   range still shows its aggregate through the rollup reader ✅
 
 ### Step 6 — Release machinery + uninstaller
-**Status:** complete — acceptance-reviewed 2026-09-26; two items are human and stay open below
+**Status:** complete — acceptance-reviewed 2026-09-26; one item is human and stays open below
 - [x] `Scripts/sign.sh` (`SIGNING=adhoc|devid` seam, used by `bundle.sh`), `dmg.sh`, `install.sh`
       (hash-pinned, `--user`, `--dir`, `--dmg`, `--sha256`), **`uninstall.sh`** (delegates to the app),
       `release-assets.sh` and the `make release-assets|release-check|install|uninstall` targets
@@ -298,8 +298,7 @@ Raw rows pruned at 400 days; `daily` rollups kept. Export = CSV (never the prima
       release; `workflow_dispatch` is the dry run), plus `DEEPTALLY_LEDGER` already shipped in Step 5
 - [x] User docs written during Steps 3–4: `INSTALL.md`, `UNSIGNED.md`, `PRIVACY.md`, `ARCHITECTURE.md`,
       `DEVELOPMENT.md`, `RELEASING.md`, `USAGE.md`, `SECURITY.md`, `CONTRIBUTING.md`
-- [ ] **Three Gatekeeper dialog screenshots** remain placeholders in `INSTALL.md`; they need a human to click
-      through a quarantined first launch on macOS 27
+- [x] **Three Gatekeeper dialog screenshots** in `INSTALL.md` — captured 2026-09-26 on a quarantined first launch (macOS 27): the block dialog, the Security section with *Open Anyway*, and the authentication prompt. The flow has **no separate confirm step**: after Touch ID the app opens (system log: one prompt, then the process launched). The same wording was corrected in the README `Scripts/dmg.sh` writes into the DMG.
 - [x] Homebrew formula **generated** per release (`dist/deeptally.rb`, tarball URL + SHA-256, `libexec` +
       symlink so the CLI finds its resource bundle) and the tap procedure documented; the tap repository
       itself is created with the first release, because a formula before its artifact exists would 404.
@@ -570,6 +569,7 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | Uninstaller ownership (Step 6) | **The Swift `Uninstaller` owns the removal list**; `Scripts/uninstall.sh` execs `DeepTally --uninstall`, so the popover button and the script cannot drift. `--keep-login-item`/`--keep-keychain` exist so the release gate never touches the machine that runs it |
 | Install-time trust (Step 6) | `install.sh` verifies the DMG's SHA-256 **before** mounting and `codesign --verify --strict` **after** copying; quarantine is cleared only on a verified install, and a new copy is staged and swapped so a failed copy leaves the working app alone |
 | Homebrew tap timing (Step 6) | The **tap repository is created with the first release**; `release-assets.sh` renders `dist/deeptally.rb` per version. A formula published before its artifact exists would 404 |
+| GitHub default branch (Step 7) | **`main` from the first release** (was `develop`): a released product should clone at the last release, while `develop` remains the integration branch and the base for PRs |
 
 ## 10. Progress log
 
@@ -600,6 +600,7 @@ Commits drive the CHANGELOG. Artifacts: DMG + `SHA256SUMS` + source tarball, pub
 | 2026-09-26 | 5 | **Step 5 gate passed** (harness `/tmp/deeptally-step5-gate.sh`, real ledger): window numbers identical before/after a 30-day prune; the long window reports 13 rollup days with no spurious unavailable day; the 30-day window matches the exported raw rows to the micro-dollar (spend 0.424729, 279 requests, 41,601,554 prompt tokens, 99.2% cache hit); `csvRoundTrips` compares the `daily` tables between a source ledger and a fresh ledger imported from its export — identical. |
 | 2026-09-26 | 5 | Independent read-only review of `2351178..2423fea` (fresh context): **no code defect**; five documentation gaps, all closed — the stale "after Step 4" status paragraphs, an overstated provider-filter day contract (tightened in code rather than documented as a wart), a comment about CSV error text, and two comments still naming the settings panel as the caveat's home. The reviewer had no shell, so the parent re-ran its three mutation checks in a disposable clone: each reverted fix makes its guarding test fail. Step 5 closed. |
 | 2026-09-26 | 6 | Wave 1 lanes merged: **release scripts** (`sign.sh`, `install.sh`, `uninstall.sh`, `release-assets.sh`, Make targets), **CI workflows**, **in-app uninstaller** (363 tests: 242 core + 38 CLI + 83 app). First real CI run green on macOS-26 in 2m38s; both workflows registered `active`; **Immutable Releases enabled** via the repository API. Docs lane merged on top, turning every "planned (Step 6)" sentence into the shipped commands and fixing a real trap: `SHA256SUMS` lists four files, so a DMG-only download needs the grep form. |
+| 2026-09-26 | 6 | **Gatekeeper dialog screenshots captured and the flow corrected.** A quarantined first launch on macOS 27 (build with `CFBundleVersion=2` so the ad-hoc signature differed from the already-approved build) produced the three screens now committed as `docs/assets/install-{block-dialog,privacy-security,authenticate}.png`. The system log settles the flow: the block dialog, then *Open Anyway* in System Settings, then **one** authentication prompt — and the app launches. The "confirm Open" step in `INSTALL.md`, the DMG's `README.txt` (`Scripts/dmg.sh`) and the S1 entry in `SPIKES.md` all said otherwise and were corrected; `INSTALL.md` also stopped saying no release had been published. |
 | 2026-09-26 | 6 | **Release dry run, first end-to-end execution of the release workflow** (run 36227866864, 2m37s, throwaway branch since the CHANGELOG heading is required): version + CHANGELOG validation, `make release-check`, release-notes extraction, dry-run stop. Nothing was published; the branch was deleted. The publish step itself runs first at the v0.1.0 tag, which is Step 7's job. |
 | 2026-09-26 | 5 | **UI defect found by the user on real data, after Step 6:** the cache-hit trend drew every bar with `maxWidth: .infinity`, so the real two-day ledger rendered two 100% days as one panel-wide blue capsule that read as an unlabeled button that did nothing. Bars are now capped (10 pt, 2 pt floor, width shared across a full month) with the width arithmetic extracted to `TrendScale.barWidth` and tested; the same round exposed a swift-testing inference trap (a literal `(280 - 58) / 30` typed as integer division) now written explicitly. `bfdbd64`. The stale Sep-24 DMG that originally hid the fix was ejected and replaced, and the app in `/Applications` was reinstalled from the fresh build. |
 | 2026-09-26 | 6 | **Step 6 gate passed:** install into a throwaway prefix (hash verified, signature verified, wrong hash refused), print-only a no-op, uninstall with `--keep-keychain`/`--keep-login-item` leaving no residue and both bystanders intact, reinstall clean; the CLI tarball runs under `env -i`; the formula pins version, url and tarball hash. Independent read-only review found one P1 (the `--keep-data` help text promised to keep preferences and caches; it keeps only app data) and four P2s — `install.sh` deleting the working app before a possibly failing copy (now staged and swapped), the manual-removal text missing saved state, a stale `DEVELOPMENT.md` and the missing `make install|uninstall` targets, and an undocumented local `.sha256` source. All fixed, gate re-run green. **Still human:** the three Gatekeeper dialog screenshots and the DMG on a second macOS version. |

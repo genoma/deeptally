@@ -122,7 +122,7 @@ The release targets `install`, `uninstall`, `release-assets` and `release-check`
 
 ## 7. Git flow and versioning
 
-- `main` = released code only. `develop` = integration (GitHub default branch).
+- `main` = released code only (the GitHub default branch from v0.1.0, and what a fresh clone checks out). `develop` = integration.
 - Branches: `feature/*` off `develop`, `release/x.y.z` off `develop`, `hotfix/*` off `main`.
 - Merge via `--no-ff`; tag releases `vX.Y.Z` on `main`.
 - **Conventional Commits** (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `ci:`).

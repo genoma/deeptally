@@ -135,7 +135,7 @@ search by default (Xcode installs it under `plugins/`). The test target passes
 
 Git flow ([`../AGENTS.md`](../AGENTS.md) §7):
 
-- `main` = released code only; `develop` = integration (the GitHub default branch, and the base for PRs).
+- `main` = released code only (the GitHub default branch from v0.1.0); `develop` = integration (the base for PRs).
 - `feature/*` branches from `develop`; `release/x.y.z` from `develop`; `hotfix/*` from `main`.
 - Merge with `--no-ff`; tag releases `vX.Y.Z` on `main`.
 

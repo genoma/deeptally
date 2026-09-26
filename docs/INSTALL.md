@@ -4,8 +4,7 @@ DeepTally is **ad-hoc signed and not notarized** — there is no Apple Developer
 deliberate, documented trade-off and it shapes every install path below. If a Gatekeeper dialog worries you,
 read [`UNSIGNED.md`](UNSIGNED.md) first: it explains exactly what macOS is warning about and what is harmless.
 
-**Status:** no release has been published yet. The first one, v0.1.0, is what makes the release URLs below
-resolve; until then, build from source (Path 3).
+**Status:** v0.1.0 is the first release; the download URLs below resolve to it.
 
 ## Requirements (all paths)
 
@@ -56,20 +55,23 @@ script reads the `.sha256` file next to the DMG when one exists, which is what `
 5. macOS blocks the first launch. Dismiss the dialog ("Done").
 6. Open **System Settings → Privacy & Security**, scroll to the **Security** section, and click
    **Open Anyway** next to DeepTally.
-7. Authenticate (Touch ID or your password), then confirm **Open**.
+7. Authenticate with Touch ID or your password; DeepTally opens.
 
 The old bypass — Control-click → Open — was removed in macOS 15, so the System Settings route above is the
-supported way through.
+supported way through. These are the three screens of that route (captured on macOS 27; macOS 26 shows the
+same flow):
 
-<!-- SCREENSHOT PLACEHOLDERS (spike S1): docs/assets/install-{block-dialog,privacy-security,
-     confirm-open}.png are still MISSING. S1 recorded the outcome in text (kernel-killed until approved,
-     and the per-build exception), not the dialogs, and the wording differs per macOS release. Replace these
-     three placeholders and delete this comment after Step 7's fresh-machine install exercises the flow. -->
-> 📷 *Screenshot placeholder — the first-launch block dialog on macOS 27 (spike S1; not captured yet).*
->
-> 📷 *Screenshot placeholder — System Settings → Privacy & Security with the "Open Anyway" button (not captured yet).*
->
-> 📷 *Screenshot placeholder — the final confirmation dialog after "Open Anyway" (not captured yet).*
+**1. The first-launch block dialog** (step 5)
+
+![The "DeepTally Not Opened" dialog: Apple could not verify "DeepTally" is free of malware, with a Move to Trash button and a Done button](assets/install-block-dialog.png)
+
+**2. Open Anyway in System Settings → Privacy & Security → Security** (step 6)
+
+![The Security section with "DeepTally was blocked to protect your Mac" and an Open Anyway button](assets/install-privacy-security.png)
+
+**3. The authentication prompt** (step 7)
+
+![The authentication prompt: you are attempting to open an app that may cause harm to your Mac or compromise your privacy, with Touch ID or an administrator's name and password, and Use Password… and Cancel buttons](assets/install-authenticate.png)
 
 Notes:
 
