@@ -111,6 +111,37 @@ struct UninstallerTests {
     #expect(kept.note == "kept: --keep-keychain")
   }
 
+  @Test("--keep-login-item leaves the registration alone and removes everything else")
+  func keepLoginItemLeavesTheRegistration() throws {
+    let scenery = try UninstallScenery()
+    defer { scenery.removeAll() }
+    let loginItem = LoginItemStub()
+    loginItem.status = .enabled
+    let keychain = StubKeychainItem(isPresent: true)
+
+    let report = makeUninstaller(
+      scenery, loginItem: loginItem, keychain: keychain, keepsLoginItem: true
+    ).run()
+
+    // The release gate runs this on a machine whose login item must survive.
+    #expect(loginItem.unregistrations == 0)
+    #expect(loginItem.status == .enabled)
+    let kept = try #require(report.lines.first { $0.name == "login item" })
+    #expect(kept.status == .skipped)
+    #expect(kept.note == "kept: --keep-login-item")
+    // Everything else still goes, including the items the other keep flags guard.
+    #expect(keychain.deletes == 1)
+    for url in scenery.removedItems {
+      #expect(!FileManager.default.fileExists(atPath: url.path), "still there: \(url.path)")
+    }
+    for url in scenery.siblings {
+      #expect(FileManager.default.fileExists(atPath: url.path))
+    }
+    #expect(report.isComplete)
+    #expect(
+      report.summary == "DeepTally is uninstalled: 6 items removed. 1 item kept as requested.")
+  }
+
   @Test("--print-only leaves everything in place and prints the plan")
   func printOnlyChangesNothing() throws {
     let scenery = try UninstallScenery()
@@ -220,7 +251,7 @@ struct UninstallerTests {
 
     let invocation = try UninstallCommand.parse(
       [
-        "--yes", "--keep-data", "--keep-keychain", "--print-only",
+        "--yes", "--keep-data", "--keep-keychain", "--keep-login-item", "--print-only",
         "--home", "/tmp/other-home", "--trash-dir", "/tmp/other-trash",
       ],
       base: scenario)
@@ -231,6 +262,7 @@ struct UninstallerTests {
     #expect(options.printOnly)
     #expect(options.keepsData)
     #expect(options.keepsKeychain)
+    #expect(options.keepsLoginItem)
     #expect(options.home.path == "/tmp/other-home")
     #expect(options.trashDirectory?.path == "/tmp/other-trash")
     // Without the two path flags the base is used unchanged.
@@ -259,7 +291,8 @@ struct UninstallerTests {
   @Test("--help exits 0 and names every flag; an unknown flag exits 2")
   func helpAndUsageErrors() throws {
     for flag in [
-      "--yes", "--print-only", "--home", "--keep-data", "--keep-keychain", "--trash-dir", "--help",
+      "--yes", "--print-only", "--home", "--keep-data", "--keep-keychain", "--keep-login-item",
+      "--trash-dir", "--help",
     ] {
       #expect(UninstallCommand.helpText.contains(flag), "the help never names \(flag)")
     }
@@ -371,11 +404,13 @@ struct UninstallerTests {
     keychain: StubKeychainItem = StubKeychainItem(),
     printOnly: Bool = false,
     keepsData: Bool = false,
-    keepsKeychain: Bool = false
+    keepsKeychain: Bool = false,
+    keepsLoginItem: Bool = false
   ) -> Uninstaller {
     Uninstaller(
       options: scenery.options(
-        printOnly: printOnly, keepsData: keepsData, keepsKeychain: keepsKeychain),
+        printOnly: printOnly, keepsData: keepsData, keepsKeychain: keepsKeychain,
+        keepsLoginItem: keepsLoginItem),
       seams: makeSeams(loginItem: loginItem, keychain: keychain))
   }
 
@@ -479,11 +514,12 @@ struct UninstallScenery {
   /// The options a test runs with: this scenery's home, bundle and Trash, so nothing reaches the
   /// real ones.
   func options(
-    printOnly: Bool = false, keepsData: Bool = false, keepsKeychain: Bool = false
+    printOnly: Bool = false, keepsData: Bool = false, keepsKeychain: Bool = false,
+    keepsLoginItem: Bool = false
   ) -> Uninstaller.Options {
     Uninstaller.Options(
       home: home, bundleURL: bundle, trashDirectory: trash, keepsData: keepsData,
-      keepsKeychain: keepsKeychain, printOnly: printOnly)
+      keepsKeychain: keepsKeychain, keepsLoginItem: keepsLoginItem, printOnly: printOnly)
   }
 
   func removeAll() {

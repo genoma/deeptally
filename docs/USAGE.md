@@ -586,6 +586,7 @@ there is no `DeepTally.app` to move. The data is purged anyway, the report says 
 | `--home PATH` | Treat `PATH` as the home directory (tests and the release gate) |
 | `--keep-data` | Keep the ledger and the Step 2 logs, remove everything else |
 | `--keep-keychain` | Keep the API key in the Keychain |
+| `--keep-login-item` | Leave the macOS login item registered (the release gate uses this so it cannot unregister one on the machine running it) |
 | `--trash-dir PATH` | Move the app bundle into `PATH` instead of the user's Trash |
 | `--help` | Every flag, and what the exit codes mean |
 

@@ -48,6 +48,9 @@ struct Uninstaller {
     var keepsData = false
     /// `--keep-keychain`: keep the API key.
     var keepsKeychain = false
+    /// `--keep-login-item`: leave the macOS login item registered. For the release gate on a
+    /// developer's machine, where unregistering the real registration would be a side effect.
+    var keepsLoginItem = false
     /// `--print-only`: report the plan and change nothing.
     var printOnly = false
 
@@ -140,6 +143,10 @@ struct Uninstaller {
   /// bundle, and calling `unregister` then only collects an "Operation not permitted".
   private func loginItemLine(performing: Bool) -> Report.Line {
     let detail = "Launch at login (SMAppService)"
+    guard !options.keepsLoginItem else {
+      return Report.Line(
+        status: .skipped, name: "login item", detail: detail, note: "kept: --keep-login-item")
+    }
     switch seams.loginItem.status() {
     case .notRegistered, .notFound:
       return Report.Line(status: .absent, name: "login item", detail: detail)

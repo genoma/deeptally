@@ -34,7 +34,7 @@ enum UninstallCommand {
 
   static let usageLine =
     "usage: DeepTally --uninstall [--yes] [--print-only] [--home PATH] [--keep-data] "
-    + "[--keep-keychain] [--trash-dir PATH]"
+    + "[--keep-keychain] [--keep-login-item] [--trash-dir PATH]"
 
   /// `--help` output: every flag, what each one does, and the exit codes a script can branch on.
   static let helpText = """
@@ -56,6 +56,8 @@ enum UninstallCommand {
       --home PATH       treat PATH as the home directory (tests and the release gate)
       --keep-data       keep the ledger and the Step 2 logs
       --keep-keychain   keep the API key in the Keychain
+      --keep-login-item leave the macOS login item registered (the release gate: no side effect on
+                        the machine running it)
       --trash-dir PATH  move the app bundle into PATH instead of the user's Trash
       --help, -h        this help
 
@@ -94,6 +96,8 @@ enum UninstallCommand {
         options.keepsData = true
       case "--keep-keychain":
         options.keepsKeychain = true
+      case "--keep-login-item":
+        options.keepsLoginItem = true
       case "--home":
         options.home = try path(after: &index, flag: flag, in: arguments)
       case "--trash-dir":
