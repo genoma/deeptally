@@ -4,31 +4,44 @@ DeepTally is **ad-hoc signed and not notarized** — there is no Apple Developer
 deliberate, documented trade-off and it shapes every install path below. If a Gatekeeper dialog worries you,
 read [`UNSIGNED.md`](UNSIGNED.md) first: it explains exactly what macOS is warning about and what is harmless.
 
-**Status:** v1 is not released yet. Paths 1 and 2 describe the shipping machinery planned in Step 6 of
-[`PLAN.md`](PLAN.md); their exact URLs and flags are frozen when that step lands. Path 3 works today.
+**Status:** no release has been published yet. The first one, v0.1.0, is what makes the release URLs below
+resolve; until then, build from source (Path 3).
 
 ## Requirements (all paths)
 
-- macOS **15.0 or later**. The app is built and verified on macOS 27 "Golden Gate"; Step 7's release gate
-  installs on a fresh macOS 15/26/27 machine using only these instructions.
+- macOS **15.0 or later**. The app is built and verified on macOS 27 "Golden Gate"; installing on a fresh
+  macOS 15, 26 or 27 machine is part of the release checklist.
 - **Apple silicon (arm64) only.** The binaries are arm64; Intel Macs and Rosetta are not supported.
 - No admin rights are needed for the CLI, and the install script's `--user` mode needs none either.
 
-## Path 1 — install script (recommended; planned in Step 6)
+## Path 1 — install script (recommended)
 
-The release pipeline publishes an install script (`Scripts/install.sh`) next to the DMG. It:
+The release publishes an install script (`Scripts/install.sh`) next to the DMG. One line installs the app
+into `~/Applications`, which needs no admin rights:
+
+```sh
+curl -fsSL https://github.com/genoma/deeptally/releases/latest/download/install.sh | bash -s -- --user
+```
+
+Without `--user` the script installs into `/Applications`; `--dir DIR` overrides the destination. The script:
 
 1. downloads the DMG with `curl` — **not** a browser;
-2. verifies the download against the published `SHA256SUMS`;
-3. copies `DeepTally.app` into `/Applications`, or into `~/Applications` with `--user`.
+2. verifies it against the release's `SHA256SUMS` — a mismatch, or a missing line for the DMG, refuses the
+   install and copies nothing;
+3. mounts the DMG read-only and copies `DeepTally.app` into place;
+4. runs `codesign --verify --strict` on the copy;
+5. clears the `com.apple.quarantine` attribute from the copy only after the hash matched.
 
 Why `curl` matters: Gatekeeper only gates files carrying the `com.apple.quarantine` attribute, and browsers
 add it to downloads. `curl` does not — a `curl`-downloaded file carries only `com.apple.provenance`
 (verified 2026-09-24, spike S6). So this path skips the block/`Open Anyway` dance entirely, while still
 checking the hash of what it installed.
 
-TODO (Step 6): the one-line invocation and the release URL are frozen together with `Scripts/install.sh`.
-Nothing is published yet — do not run a guessed URL.
+Other flags: `--version X.Y.Z` installs a specific release instead of the latest tag; `--yes` answers the
+"quit the running app?" and "replace the existing install?" questions without a prompt — needed when you
+re-run the piped command to update, because the pipe leaves the script no terminal to ask on;
+`--dmg PATH --sha256 HEX` installs from a DMG you downloaded yourself. `Scripts/install.sh --help` lists them
+all. On any refusal the script prints one sentence to stderr and exits `1`.
 
 ## Path 2 — DMG (manual)
 
@@ -99,6 +112,26 @@ Both halves resolve the key the same way — **Keychain first, then `DEEPSEEK_AP
 `swift run deeptally key import --shell zsh` stores it once and the CLI and the app then use the same key. The
 full command set, the exit codes and the settings are in [`USAGE.md`](USAGE.md).
 
+## Path 4 — CLI only (release tarball)
+
+Each release publishes `deeptally-X.Y.Z-arm64.tar.gz` for a CLI without the menu bar app. The archive holds
+the `deeptally` binary and the `DeepTally_DeepTallyCore.bundle` directory it reads its price table and
+holiday calendar from; both sit at the archive root and have to stay side by side.
+
+```sh
+VERSION=0.1.0
+curl -fSL --retry 3 -o "deeptally-${VERSION}-arm64.tar.gz" \
+  "https://github.com/genoma/deeptally/releases/download/v${VERSION}/deeptally-${VERSION}-arm64.tar.gz"
+mkdir -p ~/.local/bin
+tar -xzf "deeptally-${VERSION}-arm64.tar.gz" -C ~/.local/bin
+deeptally --version
+```
+
+`~/.local/bin` is not on the default `PATH`: add `export PATH="$HOME/.local/bin:$PATH"` to your shell
+profile, or extract into a directory that already is. Check the tarball's SHA-256 against `SHA256SUMS` before
+extracting ([`UNSIGNED.md`](UNSIGNED.md)). The key handling, commands and exit codes are the same as for the
+source build above; the full reference is [`USAGE.md`](USAGE.md).
+
 ## After installing
 
 **1. Connect your API key.** Until you do, the popover says *"No API key yet. Import it from your login shell
@@ -141,5 +174,21 @@ the next, because the default keychain ACL is permissive for your own session ([
 
 ## Uninstalling
 
-See the export/delete section of [`PRIVACY.md`](PRIVACY.md). A one-step in-app uninstaller is planned in
-Step 6 (`install → uninstall → reinstall` is that step's gate).
+DeepTally uninstalls itself: click the status item, then **Uninstall DeepTally…** in the popover footer. The
+confirmation lists everything it will remove and offers **Export CSV First…** — the ledger is the one file
+that cannot be recreated, so exporting it before the removal is one click. Then, in order:
+
+1. unregisters the **login item** (`Launch at login`);
+2. deletes the **API key** from the Keychain;
+3. removes `~/Library/Application Support/DeepTally` — the ledger, its side files and the launch logs;
+4. removes the **preferences** domain `io.github.genoma.deeptally`;
+5. removes `~/Library/Caches/io.github.genoma.deeptally`;
+6. removes `~/Library/Saved Application State/io.github.genoma.deeptally.savedState`, when macOS wrote one;
+7. moves `DeepTally.app` to the Trash, so it stays recoverable.
+
+Nothing outside that list is touched. If you built from source (Path 3), [`../Scripts/uninstall.sh`](../Scripts/uninstall.sh)
+drives the same code from a terminal: it finds the app in `/Applications` or `~/Applications` (`--app PATH`
+overrides that) and passes `--yes`, `--print-only`, `--keep-data`, `--keep-keychain` and `--trash-dir PATH`
+through to `DeepTally --uninstall`. With no bundle found it removes nothing and prints the manual commands
+from [`PRIVACY.md`](PRIVACY.md). The export and delete details are in the export/delete section of
+[`PRIVACY.md`](PRIVACY.md).
