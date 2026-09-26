@@ -21,6 +21,19 @@ enum MetricFormatting {
     return "\(Int((ratio * 100).rounded()))%"
   }
 
+  /// `5,275` — a row count a person reads, with grouping. The menu bar deliberately does without a
+  /// separator so its width cannot jump, but a sentence about a 5,275-row file is easier to scan
+  /// with one.
+  static func groupedCount(_ count: Int) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    // en_US_POSIX disables grouping on its own; the CLI's `grouped` sets it explicitly for the same
+    // reason, and the two must print the same digits.
+    formatter.usesGroupingSeparator = true
+    return formatter.string(from: NSNumber(value: count)) ?? "\(count)"
+  }
+
   /// The same three-case mapping `BalanceMonitor` uses, kept here because `Sources/DeepTallyCore`
   /// owns that one privately and the app layer cannot reach it.
   private static func currencyPrefix(_ currency: String) -> String {

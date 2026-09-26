@@ -423,7 +423,24 @@ Chinese public holidays); only the presentation is local. If the bundled price t
 section says *"Rate information is not available yet."* and a banner above names the problem; an invalid user
 override falls back to the bundled table instead, so prices stay on screen.
 
-### 4. Startup
+### 4. Local usage file
+
+The ledger's two CSV actions, in the order you would use them.
+
+- **Export CSV…** writes every stored row to a file you choose, defaulting to
+  `DeepTally-usage-YYYY-MM-DD.csv` with today's date in your timezone. The format is exactly what
+  `deeptally ledger export` writes, and the line under the buttons reports how many rows went out.
+- **Import CSV…** adds the rows of a file DeepTally or the `deeptally` CLI wrote. A row already in the
+  ledger is skipped — the ledger keys every row on the source it came from — so importing the same file
+  twice adds nothing the second time, and the line says so rather than reporting a silent zero.
+
+An import is all-or-nothing: a file with one malformed row is refused whole and the line names the line
+number and the reason, so a half-imported spreadsheet cannot exist. A successful import re-reads the
+menu bar metrics and the unpriced-rows note immediately, instead of waiting for the next fifteen-minute
+pass. Exporting is also the first thing to do before uninstalling, since the ledger is the only copy of
+your history.
+
+### 5. Startup
 
 **Startup** holds one switch, **Launch at login**. It registers DeepTally through macOS
 `SMAppService.mainApp` — no helper bundle, no LaunchAgent (that was measured as unnecessary,
@@ -432,12 +449,12 @@ wants something from you, a line below the switch says so: *"Waiting for approva
 General → Login Items."*, *"macOS has no login item for DeepTally; registration works best from
 /Applications."*, or an unknown-status report.
 
-### 5. Settings
+### 6. Settings
 
 The settings block — refresh cadence, threshold, menu bar metric, notifications and the key row. It sits
 below the popover's fold (scroll the popover to reach it), and it is all in the reference below.
 
-### 6. Footer
+### 7. Footer
 
 One compact line: the version from the bundle (`0.1.0` for a local `make bundle`, `dev` for a bare binary),
 *"local-only"*, a **Quit** button, and the key-store line described above.

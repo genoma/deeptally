@@ -57,6 +57,11 @@ final class AppModel {
   /// One calm sentence from the last pass about rows the price table cannot price, or `nil` when
   /// every offered row had a price. Not a failure: the metrics still carry the priced rows' values.
   private(set) var localUsagePricingNote: String?
+  /// `true` while a CSV export or import is in flight. One flag for both, because both write through
+  /// the same ledger connection and the buttons must not queue a second transfer behind the first.
+  private(set) var isTransferringLedger = false
+  /// The last transfer's report or failure, one sentence, or `nil` before any transfer ran.
+  private(set) var ledgerTransferMessage: String?
 
   /// Written by `SettingsPanel` through `@Bindable`; every write is validated, persisted and acted
   /// on in ``settingsDidChange(from:)``.
@@ -575,6 +580,100 @@ final class AppModel {
       // A failed pass keeps the last good numbers: blanking them would turn a transient unreadable
       // file into "you spent nothing".
       if let metrics = outcome.metrics { self.localUsage = metrics }
+    }
+  }
+
+  // MARK: - CSV transfer
+
+  /// Opens a save panel and writes the ledger as CSV. Choosing a destination is the modal step; the
+  /// write itself runs on the ledger's actor.
+  func exportLedger() {
+    guard !isTransferringLedger else { return }
+    let name = LedgerPanels.suggestedExportName(now: now())
+    guard let url = LedgerPanels.chooseExportURL(suggestedName: name) else { return }
+    exportLedger(to: url)
+  }
+
+  /// The testable half of the export: a path the caller chose, so the file and the sentence can be
+  /// asserted without a modal panel.
+  func exportLedger(to url: URL) {
+    guard !isTransferringLedger else { return }
+    isTransferringLedger = true
+    ledgerTransferMessage = nil
+    let ledger = localUsageLedger
+    Task { [weak self] in
+      do {
+        let outcome = try await ledger.exportCSV(to: url)
+        guard let self else { return }
+        self.isTransferringLedger = false
+        self.ledgerTransferMessage =
+          "Exported \(Self.rowCount(outcome.rows)) to \(url.lastPathComponent)."
+      } catch {
+        guard let self else { return }
+        self.isTransferringLedger = false
+        self.ledgerTransferMessage = Self.describeTransferFailure(error)
+      }
+    }
+  }
+
+  /// Opens an open panel and imports the file it returns.
+  func importLedger() {
+    guard !isTransferringLedger else { return }
+    guard let url = LedgerPanels.chooseImportURL() else { return }
+    importLedger(from: url)
+  }
+
+  /// The testable half of the import. A successful import re-reads the metrics and the unpriced
+  /// note, so a file full of rows the price table cannot price shows the same quiet caveat an
+  /// opencode import would set — not a second, different notice.
+  func importLedger(from url: URL) {
+    guard !isTransferringLedger else { return }
+    isTransferringLedger = true
+    ledgerTransferMessage = nil
+    let ledger = localUsageLedger
+    Task { [weak self] in
+      do {
+        let outcome = try await ledger.importCSV(from: url)
+        guard let self else { return }
+        self.isTransferringLedger = false
+        self.ledgerTransferMessage =
+          outcome.rows == 0
+          ? "Imported nothing new from \(url.lastPathComponent); every row was already stored."
+          : "Imported \(Self.rowCount(outcome.rows)) from \(url.lastPathComponent)."
+        self.refreshLocalUsage()
+      } catch {
+        guard let self else { return }
+        self.isTransferringLedger = false
+        self.ledgerTransferMessage = Self.describeTransferFailure(error)
+      }
+    }
+  }
+
+  /// `2 rows`, `1 row`, `0 rows` — the count and the noun together, so no caller can pluralise one
+  /// without the other.
+  private static func rowCount(_ rows: Int) -> String {
+    "\(MetricFormatting.groupedCount(rows)) \(rows == 1 ? "row" : "rows")"
+  }
+
+  /// One user-facing sentence for a failed transfer, from the cases a user can actually reach.
+  ///
+  /// Deliberately **not** exhaustive over `LedgerError` (AGENTS.md §9.14): an unknown case falls back
+  /// to a generic sentence instead of failing this target to compile, and no branch can echo a row's
+  /// contents — the messages carry a file name and, for a bad row, the line number and the parser's
+  /// own reason.
+  private static func describeTransferFailure(_ error: Error) -> String {
+    guard let ledgerError = error as? LedgerError else {
+      return "The CSV transfer failed."
+    }
+    switch ledgerError {
+    case .fileMissing(let path), .unreadableFile(let path, _):
+      return "Could not read \(URL(fileURLWithPath: path).lastPathComponent)."
+    case .cannotWrite(let path, _):
+      return "Could not write \(URL(fileURLWithPath: path).lastPathComponent)."
+    case .malformedCSV(let line, let reason):
+      return "That CSV cannot be imported: \(reason) (line \(line))."
+    default:
+      return "The CSV transfer failed."
     }
   }
 

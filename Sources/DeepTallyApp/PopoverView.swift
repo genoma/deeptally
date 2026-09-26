@@ -21,6 +21,12 @@ struct PopoverView: View {
         Divider()
         RateNowPanel(display: model.rateNow)
         Divider()
+        LedgerTransferSection(
+          isTransferring: model.isTransferringLedger,
+          message: model.ledgerTransferMessage,
+          onExport: { model.exportLedger() },
+          onImport: { model.importLedger() })
+        Divider()
         startupSection
         Divider()
         settingsSection

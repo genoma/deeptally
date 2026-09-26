@@ -198,6 +198,36 @@ actor LocalUsageLedger {
       rows: summary.rowsUnpriced, models: summary.models.map(\.model), scope: "ledger")
   }
 
+  // MARK: - CSV transfer
+
+  /// What one CSV transfer did, as a count. The wording belongs to the caller: this actor reports a
+  /// number, the model turns it into a sentence.
+  struct TransferOutcome: Sendable, Equatable {
+    /// Export: rows written. Import: rows the ledger did not already have.
+    let rows: Int
+  }
+
+  /// Writes every raw row to `url` and returns how many went out.
+  ///
+  /// The same `exportCSV` the CLI uses, on the actor's own connection, so a large ledger cannot
+  /// block the popover and the app and the CLI produce byte-identical files for the same ledger.
+  func exportCSV(to url: URL) throws -> TransferOutcome {
+    let ledger = try openLedger()
+    try ledger.exportCSV(to: url)
+    // Every stored row is one request; the summary count is the number of lines written after the
+    // header, and it reads the same store the export just read.
+    let rows = try ledger.summary(since: .distantPast, until: .distantFuture).requestCount
+    return TransferOutcome(rows: rows)
+  }
+
+  /// Adds the rows in a CSV file this app or the CLI wrote, and returns how many were new.
+  ///
+  /// A file with one malformed row is refused whole, so the ledger is either untouched or holds the
+  /// file's rows — never half of them (`LedgerStore.importCSV(from:)` parses before it writes).
+  func importCSV(from url: URL) throws -> TransferOutcome {
+    TransferOutcome(rows: try openLedger().importCSV(from: url))
+  }
+
   private func openLedger() throws -> LedgerStore {
     if let ledger { return ledger }
     let opened = try LedgerStore(url: ledgerURL)
