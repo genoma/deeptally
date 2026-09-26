@@ -48,11 +48,27 @@ mkdir -p "$STAGE"
 cp "$BIN_PATH/$CLI_NAME" "$STAGE/$CLI_NAME"
 cp -R "$BIN_PATH/$CORE_BUNDLE" "$STAGE/$CORE_BUNDLE"
 
+# The CLI reports its version from the bundle beside it (Sources/DeepTallyCLI/Version.swift), so the
+# staged copy is what carries the release version. PlistBuddy: Add on a fresh SwiftPM bundle, Set on a
+# bundle that already gained the key in a previous run.
+PLIST="$STAGE/$CORE_BUNDLE/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$PLIST" \
+  || fail "could not stamp $CORE_BUNDLE with version $VERSION"
+
 # The CLI must read the price table and holiday calendar out of the bundle that ships beside it,
 # or the archive layout is wrong. 'rate' needs no key and exercises both resources.
 if ! "$STAGE/$CLI_NAME" rate >/dev/null 2>&1; then
   rm -rf "$STAGE"
   fail "the staged $CLI_NAME could not run 'rate' — it cannot find its bundled resources; refusing to publish $TARBALL"
+fi
+
+# v0.1.0 shipped a CLI that reported 0.1.0-dev, because the version was a source constant the pipeline
+# never touched. A staged CLI that does not report this release's version is not publishable.
+reported="$("$STAGE/$CLI_NAME" --version | awk '{ print $2 }')"
+if [ "$reported" != "$VERSION" ]; then
+  rm -rf "$STAGE"
+  fail "the staged $CLI_NAME reports '$reported', not '$VERSION' — refusing to publish $TARBALL"
 fi
 
 # COPYFILE_DISABLE keeps ._* AppleDouble entries out of the archive (BSDTar would add them).
