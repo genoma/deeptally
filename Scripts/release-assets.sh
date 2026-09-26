@@ -48,13 +48,13 @@ mkdir -p "$STAGE"
 cp "$BIN_PATH/$CLI_NAME" "$STAGE/$CLI_NAME"
 cp -R "$BIN_PATH/$CORE_BUNDLE" "$STAGE/$CORE_BUNDLE"
 
-# The CLI reports its version from the bundle beside it (Sources/DeepTallyCLI/Version.swift), so the
-# staged copy is what carries the release version. PlistBuddy: Add on a fresh SwiftPM bundle, Set on a
-# bundle that already gained the key in a previous run.
-PLIST="$STAGE/$CORE_BUNDLE/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$PLIST" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$PLIST" \
-  || fail "could not stamp $CORE_BUNDLE with version $VERSION"
+# The CLI reports its version from the Version.txt resource in this bundle (Sources/DeepTallyCore/
+# Version.swift), so the staged copy is what carries the release version. The path is discovered rather
+# than assumed: the bundle layout differs between SwiftPM toolchains (flat vs Contents/), and
+# Bundle.module is what the CLI itself uses to find the file.
+VERSION_FILE="$(find "$STAGE/$CORE_BUNDLE" -type f -name Version.txt -print -quit)"
+[ -n "$VERSION_FILE" ] || fail "no Version.txt inside $CORE_BUNDLE — the bundle layout changed; refusing to publish $TARBALL"
+printf '%s\n' "$VERSION" > "$VERSION_FILE"
 
 # The CLI must read the price table and holiday calendar out of the bundle that ships beside it,
 # or the archive layout is wrong. 'rate' needs no key and exercises both resources.
