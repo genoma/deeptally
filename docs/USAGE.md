@@ -6,7 +6,7 @@ and a way out. Everything it stores is on your Mac ([`PRIVACY.md`](PRIVACY.md)).
 
 ![The DeepTally popover](assets/popover.png)
 
-**Status: pre-alpha (development build `0.1.0`).** This page describes what the shipping code does: the
+**Status: released.** This page describes what the shipping code does: the
 balance, the current rate, the key, the settings, the login item and the uninstaller. Where a feature does
 not exist, this page says so rather than describing an intention.
 
@@ -242,8 +242,8 @@ fold (scroll the popover to reach it), and it is all in the reference below.
 
 ### 6. Footer
 
-Two compact lines. The first is the version from the bundle (`0.1.0` for a local `make bundle`, `dev` for a
-bare binary), *"local-only"* and a **Quit** button. The second is the key-store line described above and
+Two compact lines. The first is the version from the bundle (`dev` for a bare binary), *"local-only"* and a
+**Quit** button. The second is the key-store line described above and
 **Uninstall DeepTally…**, described in [Uninstalling](#uninstalling) below.
 
 ---

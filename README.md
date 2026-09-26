@@ -41,7 +41,7 @@ How to connect your API key, what each popover section shows and every setting a
 ## Install
 
 Ad-hoc signed, not notarized — [`docs/UNSIGNED.md`](docs/UNSIGNED.md) explains what macOS is warning about.
-No release is published yet: these commands start resolving with the first one (v0.1.0).
+Released: the commands below resolve to the [latest release](https://github.com/genoma/deeptally/releases/latest).
 
 **Install script** (recommended; verifies the DMG's SHA-256 and never triggers the Gatekeeper dialog):
 

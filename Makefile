@@ -2,7 +2,8 @@
 # DeepTally build orchestration. macOS 15+, arm64 only, no Xcode required.
 SHELL := /bin/bash
 
-VERSION ?= 0.1.0
+# The dev default for a local `make bundle`/`make dmg`; every release passes VERSION explicitly.
+VERSION ?= 0.1.2
 APP := dist/DeepTally.app
 SWIFT_BUILD := swift build -c release --arch arm64
 

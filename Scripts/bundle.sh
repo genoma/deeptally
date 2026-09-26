@@ -7,7 +7,8 @@ cd "$(dirname "$0")/.."
 
 APP_NAME="DeepTally"
 BUNDLE_ID="io.github.genoma.deeptally"
-VERSION="${VERSION:-0.1.0}"
+# The dev default for a local `make bundle`/`make dmg`; every release passes VERSION explicitly.
+VERSION="${VERSION:-0.1.2}"
 BUILD_NUMBER="${BUILD_NUMBER:-1}"
 APP="dist/${APP_NAME}.app"
 
